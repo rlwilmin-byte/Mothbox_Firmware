@@ -1039,7 +1039,6 @@ def run_shutdown_pi5():
     if filesystem_needs_expansion():
         log_warn("Filesystem not yet expanded -- updating ePaper display with a "
                  "'please wait' message before blocking on the resize.")
-        GPIO.cleanup()
         run_helper("/home/pi/Desktop/Mothbox/UpdateDisplay.py", "UpdateDisplay error")
     wait_for_firstboot_settle(log=log_warn)
     # --- End first-boot guard ---
@@ -1107,11 +1106,14 @@ def run_shutdown_pi5():
     atomic_update_kv(os.path.join(CONTROL_ROOT, "mode.txt"), "mode", mode)
     
     #Epaper
-    #Update the Epaper screen if it is available 
-    GPIO.cleanup()
+    #Update the Epaper screen if policy allows
+    if should_update_display("shutdown", settings, mode, next_epoch=next_epoch_time):
+        log_info("Updating ePaper display before shutdown (if available)...")
+        run_helper("/home/pi/Desktop/Mothbox/UpdateDisplay.py", "UpdateDisplay error")
+    else:
+        log_info(f"Skipping ePaper display update before shutdown (epaper_mode={get_epaper_mode(settings)}).")
 
-    log_info("Updating ePaper display before shutdown (if available)...")
-    run_helper("/home/pi/Desktop/Mothbox/UpdateDisplay.py", "UpdateDisplay error")
+    atomic_update_kv(os.path.join(CONTROL_ROOT, "last_shutdown_epoch.txt"), "last_shutdown_epoch", str(time.time()))
 
     log_info("Shutting down in ~4 seconds...")
     time.sleep(1)
@@ -1146,7 +1148,6 @@ def run_shutdown_pi5_FAST():
     if filesystem_needs_expansion():
         log_warn("Filesystem not yet expanded -- updating ePaper display with a "
                  "'please wait' message before blocking on the resize.")
-        GPIO.cleanup()
         run_helper("/home/pi/Desktop/Mothbox/UpdateDisplay.py", "UpdateDisplay error")
     wait_for_firstboot_settle(log=log_warn)
     # --- End first-boot guard ---
@@ -1199,9 +1200,13 @@ def run_shutdown_pi5_FAST():
     set_wakeup_alarm(next_epoch_time)
     log_ok(f"Next wakeup scheduled for: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(next_epoch_time))}")
 
-    GPIO.cleanup()
-    log_info("Updating ePaper display before shutdown (if available)...")
-    run_helper("/home/pi/Desktop/Mothbox/UpdateDisplay.py", "UpdateDisplay error")
+    if should_update_display("shutdown", settings, current_mode, next_epoch=next_epoch_time):
+        log_info("Updating ePaper display before shutdown (if available)...")
+        run_helper("/home/pi/Desktop/Mothbox/UpdateDisplay.py", "UpdateDisplay error")
+    else:
+        log_info(f"Skipping ePaper display update before shutdown (epaper_mode={get_epaper_mode(settings)}).")
+
+    atomic_update_kv(os.path.join(CONTROL_ROOT, "last_shutdown_epoch.txt"), "last_shutdown_epoch", str(time.time()))
 
     # subprocess.run(["python", "/home/pi/Desktop/Mothbox/TurnEverythingOff.py"])
     os.system("sudo shutdown -h now")
@@ -2286,9 +2291,11 @@ else:
 # ~~~~~~~ Display ~~~~~~~~~~~~~~~~~~~~
 
 log_section("LAUNCH -- Display")
-log_info("Updating ePaper display (if available)...")
-GPIO.cleanup()
-run_helper("/home/pi/Desktop/Mothbox/UpdateDisplay.py", "Display error")
+if should_update_display("boot", settings, mode):
+    log_info("Updating ePaper display (if available)...")
+    run_helper("/home/pi/Desktop/Mothbox/UpdateDisplay.py", "Display error")
+else:
+    log_info(f"Skipping ePaper display update (epaper_mode={get_epaper_mode(settings)} in mode={mode}).")
 
 
 log_section("LAUNCH -- Final Mode")

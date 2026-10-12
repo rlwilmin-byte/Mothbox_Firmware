@@ -18,3 +18,4 @@ wifipass, examplepass, write the wifi password (not currently implemented)
 photo_interval,1, time in minutes between each photo. Default is 1 minute
 hardware,auto, auto detects a Mothbox Pro PCB or a DIY relay build at boot. Set to pro or diy to force it if detection ever guesses wrong
 backup_interval,5, time in minutes between backups of new photos to the USB drive. Default is 5 (valid 1-999). A final backup always runs at the end of every session regardless
+epaper_mode,always, ePaper refresh schedule: 'always' (default stock behavior), 'sparse' (refreshes only on daily first wake, final night sleep, or manual mode change), or 'never' (refreshes only in DEBUG/PARTY/OFF)
