@@ -586,6 +586,7 @@ SETTING_DEFAULTS = {
     "bat_80perVolts": 2.0,
     "bat_20perVolts": 1.0,
     "epaper_mode":  "always",
+    "enable_gps":   False,
 }
 
 def load_settings_for_wakeup():
@@ -728,6 +729,8 @@ def load_settings(filename):
                 elif setting in ("epaper_mode", "enable_epaper"):
                     # always | sparse | never (or 1 | 2 | 0)
                     result["epaper_mode"] = value.strip().lower()
+                elif setting == "enable_gps":
+                    result["enable_gps"] = value.strip().lower() in ("true", "1", "yes")
                 else:
                     print(f"Warning: Unknown setting: {setting}. Ignoring.")
             except (ValueError, TypeError):
@@ -2274,14 +2277,17 @@ run_script("/home/pi/Desktop/Mothbox/Diagnostics.py", "Startup_Check", show_outp
 
 
 log_section("LAUNCH -- GPS")
-_gps_devs = gps_devices_attached()
-if _gps_devs == 0:
-    log_info("gpsd has no device attached -- skipping the GPS read (saves ~10s).")
-elif _gps_devs < 0:
-    log_info("gpsd not reachable -- skipping the GPS read.")
+if not settings.get("enable_gps", False):
+    log_info("GPS disabled in settings (enable_gps=False) -- skipping.")
 else:
-    log_info(f"gpsd reports {_gps_devs} device(s) -- reading GPS, up to 10 seconds...")
-    run_helper("/home/pi/Desktop/Mothbox/GPS.py", "GPS error")
+    _gps_devs = gps_devices_attached()
+    if _gps_devs == 0:
+        log_info("gpsd has no device attached -- skipping the GPS read (saves ~10s).")
+    elif _gps_devs < 0:
+        log_info("gpsd not reachable -- skipping the GPS read.")
+    else:
+        log_info(f"gpsd reports {_gps_devs} device(s) -- reading GPS, up to 10 seconds...")
+        run_helper("/home/pi/Desktop/Mothbox/GPS.py", "GPS error")
 
 # Toggle a mode where the flash lights are always on
 #enable_onlyflash()
