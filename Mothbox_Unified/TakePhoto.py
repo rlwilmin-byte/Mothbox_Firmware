@@ -23,10 +23,21 @@ TODO:
 import os
 import sys
 #######---- Check for Boot lock ------
+import time
 BOOT_LOCK = "/run/boot_script_running"
 
 if os.path.exists(BOOT_LOCK):
-    sys.exit(0)
+    try:
+        # Self-healing: if the lock is older than 3 minutes, it is an orphan from an aborted shutdown or crash
+        lock_age_s = time.time() - os.path.getmtime(BOOT_LOCK)
+        if lock_age_s > 180:
+            print(f"[TakePhoto] Found stale BOOT_LOCK ({lock_age_s:.0f}s old) -- removing and continuing.")
+            os.remove(BOOT_LOCK)
+        else:
+            sys.exit(0)
+    except Exception as e:
+        print(f"[TakePhoto] Error checking BOOT_LOCK age ({e}) -- exiting.")
+        sys.exit(0)
 
 #######---- One TakePhoto at a time ------
 # cron fires every minute, but a full-resolution capture can take longer than

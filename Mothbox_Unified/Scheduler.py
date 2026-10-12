@@ -2326,6 +2326,14 @@ elif mode == "PARTY":
     # stopcron()
 elif mode == "ACTIVE":
     log_ok("Mode is ACTIVE -- session running.")
+    # Ensure attractor lights are switched on immediately for the session
+    if mothbox_hw is not None:
+        try:
+            mothbox_hw.attract_on()
+        except Exception as e:
+            log_warn(f"Failed to turn attractor lights on via mothbox_hw: {e}")
+    else:
+        run_helper("/home/pi/Desktop/Mothbox/Attract_On.py", "Attract lights error")
 else:
     log_warn(f"Unrecognised mode: {mode}")
 
@@ -2344,7 +2352,20 @@ log_section("LAUNCH -- Session Timer")
 if runtime > 0 and mode not in ("DEBUG", "PARTY"):
     enable_shutdown()
     time.sleep(0.05)
-    log_info(f"Session will run for {runtime} minute(s) then shut down.")
-    schedule_shutdown(runtime)
+
+    # Calculate actual runtime aligned to next scheduled wake slot
+    effective_runtime = runtime
+    if 'next_epoch_time' in locals() and next_epoch_time is not None:
+        seconds_to_next = next_epoch_time - time.time()
+        # If the next scheduled wake is within the normal gap (e.g. within 75 mins),
+        # shut down at least 1 minute before next wake so we don't drift into the next hour
+        if 0 < seconds_to_next <= (runtime + 20) * 60:
+            aligned_mins = max(1.0, (seconds_to_next / 60.0) - 1.0)
+            if aligned_mins < runtime:
+                log_info(f"Session aligned to next wake boundary: running for {aligned_mins:.1f} min instead of {runtime} min.")
+                effective_runtime = aligned_mins
+
+    log_info(f"Session will run for {effective_runtime:.1f} minute(s) then shut down.")
+    schedule_shutdown(effective_runtime)
 else:
     log_info("No shutdown scheduled -- running indefinitely.")
