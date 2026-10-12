@@ -106,6 +106,61 @@ def configure_display_for_mode(mode):
         # Nothing to do -- headless is already the boot default
 
 
+def get_epaper_mode(settings_dict):
+    """
+    Returns normalized epaper_mode: 'always', 'sparse', or 'never'.
+    Defaults to 'always' for full backward compatibility.
+    """
+    if not isinstance(settings_dict, dict):
+        return "always"
+    val = str(settings_dict.get("epaper_mode", settings_dict.get("enable_epaper", "always"))).strip().lower()
+    if val in ("sparse", "2"):
+        return "sparse"
+    if val in ("never", "0", "false", "off"):
+        return "never"
+    return "always"
+
+
+def should_update_display(event, settings_dict, current_mode, next_epoch=None):
+    """
+    Determines whether to update the ePaper display:
+      - 'always': updates on every event.
+      - 'never':  only updates in DEBUG, PARTY, or OFF mode.
+      - 'sparse': updates in DEBUG/PARTY/OFF, plus:
+                  - on boot: if first boot of the daily cycle (>2h since last shutdown) or manual wake.
+                  - on shutdown: if final shutdown of the cycle (>2h sleep until next wake).
+    """
+    if current_mode in ("DEBUG", "PARTY", "OFF"):
+        return True
+
+    ep_mode = get_epaper_mode(settings_dict)
+    if ep_mode == "always":
+        return True
+    if ep_mode == "never":
+        return False
+
+    # ep_mode == 'sparse'
+    if event == "boot":
+        try:
+            last_shutdown_str = read_control("last_shutdown_epoch", "0")
+            last_shutdown = float(last_shutdown_str)
+            time_since_shutdown = time.time() - last_shutdown
+            # If shutdown was > 2 hours ago (or never recorded), this is the daily first boot or a manual wake
+            return last_shutdown == 0 or time_since_shutdown > 7200
+        except Exception:
+            return True
+
+    if event == "shutdown":
+        if next_epoch is not None:
+            now_epoch = time.time()
+            sleep_duration = next_epoch - now_epoch
+            # If sleep duration > 2 hours, this is the final sleep of the night session
+            return sleep_duration > 7200
+        return True
+
+    return True
+
+
 def configure_wifi_for_mode(mode):
     """
     Enable wifi for modes that need it, disable for everything else.
@@ -530,6 +585,7 @@ SETTING_DEFAULTS = {
     "bat_Wh":       10.0,
     "bat_80perVolts": 2.0,
     "bat_20perVolts": 1.0,
+    "epaper_mode":  "always",
 }
 
 def load_settings_for_wakeup():
@@ -669,6 +725,9 @@ def load_settings(filename):
                     # auto | pro | diy -- read directly by mothbox_hw.py; parsed
                     # here only so it is recognised and shown in the boot log.
                     result["hardware"] = value.strip().lower()
+                elif setting in ("epaper_mode", "enable_epaper"):
+                    # always | sparse | never (or 1 | 2 | 0)
+                    result["epaper_mode"] = value.strip().lower()
                 else:
                     print(f"Warning: Unknown setting: {setting}. Ignoring.")
             except (ValueError, TypeError):
@@ -1002,6 +1061,9 @@ def run_shutdown_pi5():
         # than running forever.
         schedule.clear()
         schedule.every(remaining_minutes).minutes.do(run_shutdown_pi5)
+        # Release the boot lock so TakePhoto.py can continue capturing
+        if os.path.exists(BOOT_LOCK):
+            os.remove(BOOT_LOCK)
         return
     # --- End guard ---
 
@@ -1113,6 +1175,9 @@ def run_shutdown_pi5_FAST():
             print(f"Shutdown aborted -- rescheduling in {remaining_minutes:.1f} min.")
             schedule.clear()
             schedule.every(remaining_minutes).minutes.do(run_shutdown_pi5_FAST)
+            # Release the boot lock so TakePhoto.py can continue capturing
+            if os.path.exists(BOOT_LOCK):
+                os.remove(BOOT_LOCK)
             return
     # --- End guard ---
     
