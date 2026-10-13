@@ -1,2 +1,6 @@
 # macOS Finder metadata, at any depth
 .DS_Store
+
+# Python cache artifacts
+__pycache__/
+*.pyc
