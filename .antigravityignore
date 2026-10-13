@@ -1,0 +1,36 @@
+# Dependencies & environments
+node_modules/
+.venv/
+env/
+__pycache__/
+
+# Build & compiled targets
+dist/
+build/
+target/
+*.min.js
+*.bundle.*
+
+# Large data, models, and binaries
+*.csv
+*.parquet
+*.h5
+*.hdf5
+*.bag
+*.pcd
+*.las
+*.laz
+*.tar.*
+*.zip
+
+# Logs, trace files, and lockfiles
+*.log
+package-lock.json
+poetry.lock
+yarn.lock
+pnpm-lock.yaml
+
+# Local agent caches & state
+.antigravity/
+.agents/
+.cortex/

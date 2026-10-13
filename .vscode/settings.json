@@ -1,0 +1,10 @@
+{
+  "python.analysis.autoImportCompletions": true,
+  "python.analysis.typeCheckingMode": "basic",
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+  "git.autofetch": true,
+  "git.enableSmartCommit": false,
+  "editor.formatOnSave": true,
+  "editor.rulers": [80, 100]
+}
