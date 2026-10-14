@@ -479,13 +479,31 @@ def flash_is_on():
 
 
 # ----------------------------------------------------------------- lights --
-def attract_on():
+def attract_on(stagger_s=0.05):
+    """
+    Turn attract (UV / white) lights on with staged turn-on intervals.
+
+    Staging the 12V rail and individual LED MOSFET channels prevents
+    simultaneous inrush current spikes (dI/dt) from sagging the battery bus
+    and triggering a Pi 5 PMIC undervoltage reset (red-LED shutdown).
+    """
     if is_pro():
         rail_12v(True)
-        _out_many([PRO["CH3"], PRO["CH2"], PRO["CH1"], PRO["CHEXT"],
-                   PRO["CHEXT_PCB_BUG_PIN"]], True)
+        if stagger_s > 0:
+            time.sleep(stagger_s)
+            for pin in (PRO["CH1"], PRO["CH2"], PRO["CH3"], PRO["CHEXT"], PRO["CHEXT_PCB_BUG_PIN"]):
+                _out(pin, True)
+                time.sleep(stagger_s)
+        else:
+            _out_many([PRO["CH3"], PRO["CH2"], PRO["CH1"], PRO["CHEXT"],
+                       PRO["CHEXT_PCB_BUG_PIN"]], True)
     else:
-        _out_many([DIY["RELAY_ATTRACT_A"], DIY["RELAY_ATTRACT_B"]], False)
+        if stagger_s > 0:
+            _out(DIY["RELAY_ATTRACT_A"], False)
+            time.sleep(stagger_s)
+            _out(DIY["RELAY_ATTRACT_B"], False)
+        else:
+            _out_many([DIY["RELAY_ATTRACT_A"], DIY["RELAY_ATTRACT_B"]], False)
         # Relay inputs float LOW (= relay ON) before anything drives them, so
         # make the flash relay's OFF state explicit unless the flash is in use.
         if not flash_is_on():
@@ -542,14 +560,28 @@ def all_lights_off():
     print("All Lights Off")
 
 
-def all_lights_on():
-    """Everything lit. Used by PARTY mode."""
+def all_lights_on(stagger_s=0.05):
+    """Everything lit with staged turn-on. Used by PARTY mode."""
     if is_pro():
         rail_12v(True)
-        _out_many([PRO["CH3"], PRO["CH2"], PRO["CH1"], PRO["CHEXT"], PRO["FLASH"],
-                   PRO["CHEXT_PCB_BUG_PIN"]], True)
+        if stagger_s > 0:
+            time.sleep(stagger_s)
+            for pin in (PRO["CH1"], PRO["CH2"], PRO["CH3"], PRO["CHEXT"], PRO["FLASH"],
+                       PRO["CHEXT_PCB_BUG_PIN"]):
+                _out(pin, True)
+                time.sleep(stagger_s)
+        else:
+            _out_many([PRO["CH3"], PRO["CH2"], PRO["CH1"], PRO["CHEXT"], PRO["FLASH"],
+                       PRO["CHEXT_PCB_BUG_PIN"]], True)
     else:
-        _out_many([DIY["RELAY_ATTRACT_A"], DIY["RELAY_ATTRACT_B"], DIY["RELAY_FLASH"]], False)
+        if stagger_s > 0:
+            _out(DIY["RELAY_ATTRACT_A"], False)
+            time.sleep(stagger_s)
+            _out(DIY["RELAY_ATTRACT_B"], False)
+            time.sleep(stagger_s)
+            _out(DIY["RELAY_FLASH"], False)
+        else:
+            _out_many([DIY["RELAY_ATTRACT_A"], DIY["RELAY_ATTRACT_B"], DIY["RELAY_FLASH"]], False)
     print("All Lights On")
 
 
