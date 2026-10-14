@@ -377,6 +377,7 @@ mins = read_control(CONTROL_ROOT / "minutes.txt", "minutes", "errorminutes")
 runtime = read_control(CONTROL_ROOT / "runtime.txt", "runtime", "erroruntime")
 
 photo_interval =read_control(CONTROL_ROOT / "photo_interval.txt", "photo_interval", "errInt")
+capture_mode = read_control(CONTROL_ROOT / "capture_mode.txt", "capture_mode", "timelapse")
 
 
 # UTCoffset
@@ -501,7 +502,10 @@ try:
 
     draw.text((28, 5.2*rowH), runtime, font=fontHeaders, fill=0)
     
-    draw.text((78, 5.4*rowH), 'INT  '+photo_interval+" min", font=fontHeadersSmall, fill=0)
+    if str(capture_mode).strip().lower() == "burst":
+        draw.text((78, 5.4*rowH), 'BURST '+photo_interval+" min", font=fontHeadersSmall, fill=0)
+    else:
+        draw.text((78, 5.4*rowH), 'INT  '+photo_interval+" min", font=fontHeadersSmall, fill=0)
     #draw.text((30, 5.3*rowH), '                ' + photo_interval+ " mins", font=fontHeaders, fill=0)
 
     draw.text((2, 6.5*rowH), 'DAYS ' , font=fontHeadersSmall, fill=0)

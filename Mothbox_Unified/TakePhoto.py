@@ -45,15 +45,25 @@ if os.path.exists(BOOT_LOCK):
 # dies with "Camera __init__ sequence did not complete") and burn CPU on a
 # photo that will never happen -- which is heat the box cannot afford.
 import fcntl
-_PHOTO_LOCK_PATH = "/run/mothbox_takephoto.lock"
-try:
-    _photo_lock = open(_PHOTO_LOCK_PATH, "w")
-    fcntl.flock(_photo_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-except OSError:
-    print("[TakePhoto] a previous photo is still in progress -- skipping this cycle")
-    sys.exit(0)
-except Exception as e:
-    print(f"[TakePhoto] could not take the single-instance lock ({e}); continuing anyway")
+import errno
+
+_photo_lock = None
+for _lock_candidate in ["/run/mothbox_takephoto.lock", "/tmp/mothbox_takephoto.lock"]:
+    try:
+        _photo_lock = open(_lock_candidate, "a+")
+        fcntl.flock(_photo_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+    except (BlockingIOError, OSError) as e:
+        if isinstance(e, BlockingIOError) or getattr(e, "errno", None) in (errno.EAGAIN, errno.EWOULDBLOCK):
+            print("[TakePhoto] a previous photo is still in progress -- skipping this cycle")
+            sys.exit(0)
+        if isinstance(e, PermissionError) or getattr(e, "errno", None) == errno.EACCES:
+            continue
+        print(f"[TakePhoto] could not take the single-instance lock ({e}); continuing anyway")
+        break
+    except Exception as e:
+        print(f"[TakePhoto] could not take the single-instance lock ({e}); continuing anyway")
+        break
 
 #-----------------------------##
 
@@ -146,6 +156,24 @@ def read_control(path: Path, key: str, default=None):
 
     return default
 
+def get_capture_mode():
+    mode_val = read_control(CONTROL_ROOT / "capture_mode.txt", "capture_mode", "timelapse")
+    return str(mode_val).strip().lower() if mode_val else "timelapse"
+
+def get_burst_count():
+    try:
+        val = int(read_control(CONTROL_ROOT / "burst_count.txt", "burst_count", 8))
+        return max(1, min(60, val))
+    except (ValueError, TypeError):
+        return 8
+
+def get_burst_interval_s():
+    try:
+        val = float(read_control(CONTROL_ROOT / "burst_interval_s.txt", "burst_interval_s", 6.0))
+        return max(0.5, min(60.0, val))
+    except (ValueError, TypeError):
+        return 6.0
+
 
 
 #IF the mothbox is supposed to be off, don't take a photo!
@@ -178,6 +206,8 @@ import csv
 import sys
 import shutil
 import io
+import queue
+import threading
 from PIL import Image
 import piexif
 try:
@@ -863,6 +893,176 @@ def takePhoto_Manual():
           i=i+1
 
 
+class PhotoSaveWorker:
+    """
+    Background worker that encodes and writes images to disk with EXIF.
+    Decouples sensor exposure pacing from disk I/O latency to preserve
+    timing stability and keep RAM footprint minimal.
+    """
+    def __init__(self, computer_name, utc_offset, sw_version, body_model, gps_lat, gps_lon):
+        self.q = queue.Queue(maxsize=3)
+        self.computer_name = computer_name
+        self.utc_offset = utc_offset
+        self.sw_version = sw_version
+        self.body_model = body_model
+        self.gps_lat = gps_lat
+        self.gps_lon = gps_lon
+        self.saved_count = 0
+        self.error_count = 0
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def enqueue(self, item):
+        self.q.put(item)
+
+    def _run(self):
+        latest_diagnostics = mothbox_exif.read_latest_diagnostics() if mothbox_exif else {}
+        while True:
+            item = self.q.get()
+            if item is None:
+                self.q.task_done()
+                break
+            try:
+                (pil_image, metadata, shot_dt, exp_us, idx, total_count, suffix, sensor_name, file_type) = item
+                offset_total_minutes = int(self.utc_offset * 60)
+                sign = "+" if offset_total_minutes >= 0 else "-"
+                abs_minutes = abs(offset_total_minutes)
+                offset_str = f"{sign}{abs_minutes // 60:02d}-{abs_minutes % 60:02d}"
+                timestamp = shot_dt.strftime("%Y-%m-%dT%H-%M-%S") + offset_str
+
+                folderPath = "/home/pi/Desktop/Mothbox/photos/"
+                if not os.path.exists(folderPath):
+                    os.makedirs(folderPath, exist_ok=True)
+                os.chmod(folderPath, 0o777)
+                folderPath = create_dated_folder(folderPath)
+
+                ext = ".jpg"
+                if file_type == 1:
+                    ext = ".png"
+                elif file_type == 2:
+                    ext = ".bmp"
+
+                filepath = os.path.join(folderPath, f"{self.computer_name}_{timestamp}{suffix}{ext}")
+
+                save_kwargs = {"quality": 96}
+                if mothbox_exif is not None:
+                    exif_bytes = mothbox_exif.build_exif_bytes(
+                        metadata=metadata,
+                        requested_exposure_us=exp_us,
+                        image_size=pil_image.size,
+                        capture_time=shot_dt,
+                        utc_offset_hours=self.utc_offset,
+                        computer_name=self.computer_name,
+                        software_version=self.sw_version,
+                        sensor_name=sensor_name,
+                        lat=self.gps_lat, lon=self.gps_lon,
+                        diagnostics=latest_diagnostics,
+                        hdr_index=idx, hdr_count=total_count,
+                        image_id=f"{self.computer_name}_{timestamp}{suffix}",
+                        body_model=self.body_model,
+                    )
+                    if exif_bytes:
+                        save_kwargs["exif"] = exif_bytes
+
+                pil_image.save(filepath, **save_kwargs)
+                print(f"[TakePhoto] Saved burst image: {filepath}")
+                self.saved_count += 1
+            except Exception as e:
+                print(f"[TakePhoto] Error saving burst image ({e})")
+                self.error_count += 1
+            finally:
+                self.q.task_done()
+
+    def wait_done(self, timeout=35):
+        self.q.put(None)
+        self.thread.join(timeout=timeout)
+
+
+def takePhoto_Burst(burst_count=8, interval_s=6.0):
+    global middleexposure, calib_lens_position, calib_exposure, calib_gain
+    print(f"\n================= STARTING BURST CAPTURE ({burst_count}X @ {interval_s:.1f}s) =================")
+
+    # 1. Apply camera controls ONCE (locked exposure, gain, focus, white balance)
+    if camera_settings:
+        picam2.set_controls(camera_settings)
+
+    cgains = (2.25943877696990967, 1.500129925489425659)
+    picam2.set_controls({"ColourGains": cgains})
+
+    exp_time = camera_settings.get("ExposureTime", 500)
+    picam2.set_controls({"ExposureTime": exp_time})
+
+    try:
+        camera_sensor_name = picam2.camera_properties.get("Model", "")
+    except Exception:
+        camera_sensor_name = ""
+
+    # 2. Start the camera stream ONCE
+    start_camera_or_warn()
+    time.sleep(1.0)  # Settle time for stream and VCM autofocus coil
+
+    save_worker = PhotoSaveWorker(
+        computer_name=computerName,
+        utc_offset=utc_offset_hours,
+        sw_version=softwareversion,
+        body_model=MOTHBOX_BODY,
+        gps_lat=gps_lat,
+        gps_lon=gps_lon,
+    )
+
+    t0 = time.monotonic()
+    successful_captures = 0
+
+    for k in range(burst_count):
+        # Monotonic deadline pacing prevents drift
+        target_deadline = t0 + (k * interval_s)
+        now_mono = time.monotonic()
+        sleep_dur = target_deadline - now_mono
+        if sleep_dur > 0:
+            time.sleep(sleep_dur)
+
+        shot_time = datetime.now()
+        elapsed_shot = time.monotonic() - t0
+        print(f"[Burst] Capturing frame {k + 1}/{burst_count} (target={k * interval_s:.1f}s, actual={elapsed_shot:.2f}s)...")
+
+        # Pulse flash for this frame only
+        flashOn()
+        try:
+            try:
+                request = picam2.capture_request(flush=True, wait=CAPTURE_TIMEOUT_S)
+            except TypeError:
+                request = picam2.capture_request(flush=True)
+        except Exception as e:
+            flashOff()
+            warn_no_camera(f"no frame from camera in burst frame {k + 1}: {e.__class__.__name__}: {e}")
+            break
+        finally:
+            flashOff()
+
+        try:
+            pil_image = request.make_image("main")
+            md = request.get_metadata()
+            request.release()
+            successful_captures += 1
+            suffix = f"_b{k + 1}"
+            save_worker.enqueue((
+                pil_image, md, shot_time, exp_time,
+                k, burst_count, suffix, camera_sensor_name, ImageFileType
+            ))
+        except Exception as e:
+            print(f"[TakePhoto] Failed to process burst frame {k + 1}: {e}")
+
+    # 3. Stop camera stream ONCE
+    print(f"\n[Burst] Capture sequence finished ({successful_captures}/{burst_count} frames). Stopping camera stream.")
+    picam2.stop()
+
+    # 4. Drain asynchronous save queue
+    print("[Burst] Waiting for image save worker to finish writing...")
+    save_worker.wait_done(timeout=35)
+    print(f"[Burst] Complete: {save_worker.saved_count} photos successfully written to disk.")
+    return successful_captures > 0
+
+
 def determinePiModel():
 
   # Check Raspberry Pi model using CPU info
@@ -1058,7 +1258,7 @@ def warn_no_camera(reason):
 # flash, warn. SIGALRM is delivered while picamera2 waits on Python-level
 # events, which is where these hangs happen.
 import signal
-PHOTO_WATCHDOG_S = 150
+PHOTO_WATCHDOG_S = max(150, int(get_burst_count() * get_burst_interval_s() + 60))
 
 def _photo_watchdog(signum, frame):
     warn_no_camera(f"photo did not complete within {PHOTO_WATCHDOG_S}s")
@@ -1167,8 +1367,16 @@ if(VerticalFlip):
 else:
     picam2.configure(capture_config)
 
-time.sleep(.5)
-takePhoto_Manual()
+capture_mode = get_capture_mode()
+burst_count = get_burst_count()
+burst_interval_s = get_burst_interval_s()
+print(f"Capture mode: {capture_mode}")
+
+if capture_mode == "burst":
+    takePhoto_Burst(burst_count=burst_count, interval_s=burst_interval_s)
+else:
+    time.sleep(.5)
+    takePhoto_Manual()
 
 
 picam2.stop()

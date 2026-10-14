@@ -41,8 +41,12 @@ This version:
 BOOT_LOCK = "/run/boot_script_running"
 
 # create lock
-with open(BOOT_LOCK, "w") as f:
-    f.write("booting\n")
+try:
+    with open(BOOT_LOCK, "w") as f:
+        f.write("booting\n")
+except (PermissionError, OSError) as e:
+    # If running as non-root or /run is unwritable, don't crash imports
+    pass
 
 #-------------------#
 
@@ -570,6 +574,9 @@ def find_file(path, filename, depth=1):
 SETTING_DEFAULTS = {
     "runtime":      0,
     "photo_interval": 1, 
+    "capture_mode": "timelapse",
+    "burst_count":  8,
+    "burst_interval_s": 6.0,
     "backup_interval": 5,
     "hardware": "auto",
     "utc_off":      0,
@@ -714,6 +721,25 @@ def load_settings(filename):
                     result["bat_20perVolts"] = float(value)
                 elif setting == "photo_interval":
                     result["photo_interval"] = int(value)
+                elif setting == "capture_mode":
+                    cm = value.strip().lower()
+                    if cm in ("burst", "timelapse"):
+                        result["capture_mode"] = cm
+                    else:
+                        print(f"WARNING: Unknown capture_mode '{value}', defaulting to timelapse")
+                        result["capture_mode"] = "timelapse"
+                elif setting == "burst_count":
+                    try:
+                        bc = int(value)
+                        result["burst_count"] = max(1, min(60, bc))
+                    except ValueError:
+                        result["burst_count"] = 8
+                elif setting == "burst_interval_s":
+                    try:
+                        bi_s = float(value)
+                        result["burst_interval_s"] = max(0.5, min(60.0, bi_s))
+                    except ValueError:
+                        result["burst_interval_s"] = 6.0
                 elif setting == "backup_interval":
                     # Consumed by Backup_Files.py directly from the CSV; parsed
                     # here only so it is recognised (no "Unknown setting" nag)
@@ -2103,6 +2129,18 @@ else:
 photo_interval = int(settings.get("photo_interval", 1))
 atomic_update_kv(os.path.join(CONTROL_ROOT, "photo_interval.txt"), "photo_interval", photo_interval)
 settings.pop("photo_interval", None)  # don't let it pollute cron builder
+capture_mode = settings.get("capture_mode", "timelapse").strip().lower()
+if capture_mode not in ("timelapse", "burst"):
+    capture_mode = "timelapse"
+atomic_update_kv(os.path.join(CONTROL_ROOT, "capture_mode.txt"), "capture_mode", capture_mode)
+burst_count = int(settings.get("burst_count", 8))
+atomic_update_kv(os.path.join(CONTROL_ROOT, "burst_count.txt"), "burst_count", burst_count)
+burst_interval_s = float(settings.get("burst_interval_s", 6.0))
+atomic_update_kv(os.path.join(CONTROL_ROOT, "burst_interval_s.txt"), "burst_interval_s", burst_interval_s)
+log_info(f"Capture mode: {capture_mode} (burst_count={burst_count}, burst_interval={burst_interval_s}s)")
+settings.pop("capture_mode", None)
+settings.pop("burst_count", None)
+settings.pop("burst_interval_s", None)
 log_info(f"Backup interval: {settings.get('backup_interval', 5)} min (read live by Backup_Files.py)")
 settings.pop("backup_interval", None)
 log_info(f"Hardware override in settings: {settings.get('hardware', 'auto')}")

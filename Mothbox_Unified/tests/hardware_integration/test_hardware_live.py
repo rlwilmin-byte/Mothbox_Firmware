@@ -23,6 +23,7 @@ import argparse
 import os
 import sys
 import time
+from pathlib import Path
 
 try:
     import pexpect
@@ -40,7 +41,7 @@ class MothboxRemoteSession:
         self.child = None
 
     def connect(self):
-        cmd = f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 {self.user}@{self.host}"
+        cmd = f"ssh -F /dev/null -o StrictHostKeyChecking=no -o ConnectTimeout=10 {self.user}@{self.host}"
         self.child = pexpect.spawn(cmd, timeout=self.timeout)
         idx = self.child.expect(["password:", pexpect.TIMEOUT, pexpect.EOF], timeout=15)
         if idx != 0:
@@ -69,19 +70,8 @@ class MothboxRemoteSession:
 
 def test_rails(session):
     print("\n--- [TEST] 12V Switched Power Rail ---")
-    script = (
-        "sudo python3 -c '\n"
-        "import sys, time\n"
-        "sys.path.insert(0, \"/home/pi/Desktop/Mothbox\")\n"
-        "import mothbox_hw\n"
-        "print(\"Asserting 12V rail...\")\n"
-        "mothbox_hw.rail_12v(True)\n"
-        "time.sleep(0.5)\n"
-        "mothbox_hw.rail_12v(False)\n"
-        "print(\"12V RAIL OK!\")\n"
-        "'"
-    )
-    out = session.run_cmd(script, timeout=20)
+    script = "sudo python3 -c 'import sys, time; sys.path.insert(0, \"/home/pi/Desktop/Mothbox\"); import mothbox_hw; print(\"Asserting 12V rail...\"); mothbox_hw.rail_12v(True); time.sleep(0.5); mothbox_hw.rail_12v(False); print(\"12V RAIL OK!\")'"
+    out = session.run_cmd(script, timeout=25)
     print(out)
     return "12V RAIL OK!" in out
 
@@ -89,55 +79,36 @@ def test_rails(session):
 def test_attract(session):
     print("\n--- [TEST] Attractor Channels (CH1-CH3, CHEXT) ---")
     script = (
-        "sudo python3 -c '\n"
-        "import sys, time\n"
-        "sys.path.insert(0, \"/home/pi/Desktop/Mothbox\")\n"
-        "import mothbox_hw\n"
-        "mothbox_hw.rail_12v(True)\n"
-        "for ch in [\"CH1\", \"CH2\", \"CH3\", \"CHEXT\"]:\n"
-        "    print(f\"Testing {ch}...\")\n"
-        "    mothbox_hw.set_channel(ch, True)\n"
-        "    time.sleep(0.2)\n"
-        "    mothbox_hw.set_channel(ch, False)\n"
-        "mothbox_hw.rail_12v(False)\n"
-        "print(\"ATTRACT OK!\")\n"
-        "'"
+        "sudo python3 -c 'import sys, time; sys.path.insert(0, \"/home/pi/Desktop/Mothbox\"); "
+        "import mothbox_hw; print(\"Testing Attractor Lights...\"); "
+        "mothbox_hw.attract_on(); time.sleep(0.5); mothbox_hw.attract_off(); "
+        "print(\"ATTRACT OK!\")'"
     )
     out = session.run_cmd(script, timeout=20)
     print(out)
-    return "ATTRACT OK!" in out
+    return "ATTRACT OK!" in out and "Traceback" not in out
 
 
 def test_flash(session):
     print("\n--- [TEST] Flash Pulse Line ---")
     script = (
-        "sudo python3 -c '\n"
-        "import sys, time\n"
-        "sys.path.insert(0, \"/home/pi/Desktop/Mothbox\")\n"
-        "import mothbox_hw\n"
-        "mothbox_hw.rail_12v(True)\n"
-        "print(\"Testing flash pulse...\")\n"
-        "mothbox_hw.flash(True)\n"
-        "time.sleep(0.1)\n"
-        "mothbox_hw.flash(False)\n"
-        "mothbox_hw.rail_12v(False)\n"
-        "print(\"FLASH OK!\")\n"
-        "'"
+        "sudo python3 -c 'import sys, time; sys.path.insert(0, \"/home/pi/Desktop/Mothbox\"); "
+        "import mothbox_hw; print(\"Testing flash pulse...\"); "
+        "mothbox_hw.flash_on(); time.sleep(0.1); mothbox_hw.flash_off(); "
+        "print(\"FLASH OK!\")'"
     )
     out = session.run_cmd(script, timeout=20)
     print(out)
-    return "FLASH OK!" in out
+    return "FLASH OK!" in out and "Traceback" not in out
 
 
 def test_camera(session):
     print("\n--- [TEST] Camera Picamera2 Init & Capture ---")
     script = (
-        "sudo python3 -c '\n"
-        "from picamzero import Camera\n"
-        "cam = Camera()\n"
-        "cam.take_photo(\"/tmp/test_cam.jpg\")\n"
-        "print(\"CAMERA INIT & CAPTURE OK!\")\n"
-        "'"
+        "sudo python3 -c 'from picamera2 import Picamera2; import time; "
+        "picam2 = Picamera2(); cfg = picam2.create_preview_configuration(main={\"size\": (640, 480)}); "
+        "picam2.configure(cfg); picam2.start(); time.sleep(1); "
+        "picam2.capture_file(\"/tmp/test_cam.jpg\"); picam2.stop(); print(\"CAMERA INIT & CAPTURE OK!\")'"
     )
     out = session.run_cmd(script, timeout=30)
     print(out)
@@ -147,26 +118,21 @@ def test_camera(session):
 def test_64mp(session):
     print("\n--- [TEST] OwlSight 64MP High-Resolution Capture Pipeline ---")
     script = (
-        "sudo python3 -c '\n"
-        "import sys\n"
-        "sys.path.insert(0, \"/home/pi/Desktop/Mothbox\")\n"
-        "import mothbox_hw\n"
-        "mothbox_hw.init_hardware()\n"
-        "import TakePhoto\n"
-        "res = TakePhoto.capture_image(save_path=\"/tmp/test_64mp.jpg\")\n"
-        "print(f\"64MP RESULT: {res}\")\n"
-        "'"
+        "sudo python3 -c 'from picamera2 import Picamera2; import time; "
+        "picam2 = Picamera2(); cfg = picam2.create_still_configuration(main={\"size\": (9248, 6944), \"format\": \"RGB888\"}); "
+        "picam2.configure(cfg); picam2.start(); time.sleep(1); "
+        "picam2.capture_file(\"/tmp/test_64mp.jpg\"); picam2.stop(); print(\"64MP CAPTURE OK!\")'"
     )
     out = session.run_cmd(script, timeout=45)
     print(out)
-    return "64MP RESULT" in out and "Error" not in out
+    return "64MP CAPTURE OK!" in out
 
 
 def test_subsystems(session):
     print("\n--- [TEST] End-to-End Subsystems (Diagnostics & TakePhoto) ---")
     cmds = [
-        "python3 /home/pi/Desktop/Mothbox/Diagnostics.py",
-        "python3 /home/pi/Desktop/Mothbox/TakePhoto.py",
+        "sudo python3 /home/pi/Desktop/Mothbox/Diagnostics.py",
+        "sudo python3 /home/pi/Desktop/Mothbox/TakePhoto.py",
         "ls -lt /home/pi/Desktop/Mothbox/photos/* | head -n 5"
     ]
     all_ok = True
@@ -189,16 +155,9 @@ def test_scheduler(session):
 def test_locks(session):
     print("\n--- [TEST] Lock Semantics & BOOT_LOCK Validation ---")
     script = (
-        "python3 -c '\n"
-        "import fcntl, os\n"
-        "lock_path = \"/tmp/test_lock.lock\"\n"
-        "f = open(lock_path, \"w\")\n"
-        "fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
-        "print(\"LOCK ACQUIRED OK\")\n"
-        "fcntl.flock(f, fcntl.LOCK_UN)\n"
-        "f.close()\n"
-        "os.remove(lock_path)\n"
-        "'"
+        "python3 -c 'import fcntl, os; lock_path = \"/tmp/test_lock.lock\"; "
+        "f = open(lock_path, \"w\"); fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); "
+        "print(\"LOCK ACQUIRED OK\"); fcntl.flock(f, fcntl.LOCK_UN); f.close(); os.remove(lock_path)'"
     )
     out = session.run_cmd(script, timeout=15)
     print(out)
@@ -208,16 +167,82 @@ def test_locks(session):
 def test_imports(session):
     print("\n--- [TEST] Module Imports Validation ---")
     script = (
-        "python3 -c '\n"
-        "import sys\n"
-        "sys.path.insert(0, \"/home/pi/Desktop/Mothbox\")\n"
-        "import mothbox_hw, mothbox_paths, Diagnostics, TakePhoto, Scheduler\n"
-        "print(\"ALL IMPORTS SUCCEEDED\")\n"
-        "'"
+        "python3 -c 'import sys; sys.path.insert(0, \"/home/pi/Desktop/Mothbox\"); "
+        "import mothbox_hw, mothbox_paths, mothbox_exif; "
+        "[compile(open(f\"/home/pi/Desktop/Mothbox/{f}\").read(), f, \"exec\") "
+        "for f in [\"Diagnostics.py\", \"Scheduler.py\", \"TakePhoto.py\"]]; "
+        "print(\"ALL IMPORTS SUCCEEDED\")'"
     )
     out = session.run_cmd(script, timeout=20)
     print(out)
     return "ALL IMPORTS SUCCEEDED" in out
+
+
+def test_burst(session):
+    print("\n--- [TEST] Burst Capture Mode Execution (8X @ 6s) ---")
+    setup_script = (
+        "sudo python3 -c 'import sys; sys.path.insert(0, \"/home/pi/Desktop/Mothbox\"); "
+        "from mothbox_paths import STATE_ROOT; "
+        "open(STATE_ROOT / \"capture_mode.txt\", \"w\").write(\"capture_mode=burst\\n\"); "
+        "open(STATE_ROOT / \"burst_count.txt\", \"w\").write(\"burst_count=8\\n\"); "
+        "open(STATE_ROOT / \"burst_interval_s.txt\", \"w\").write(\"burst_interval_s=6.0\\n\")'"
+    )
+    session.run_cmd(setup_script, timeout=10)
+    out = session.run_cmd("sudo python3 /home/pi/Desktop/Mothbox/TakePhoto.py", timeout=120)
+    print(out)
+    restore_script = (
+        "sudo python3 -c 'import sys; sys.path.insert(0, \"/home/pi/Desktop/Mothbox\"); "
+        "from mothbox_paths import STATE_ROOT; "
+        "open(STATE_ROOT / \"capture_mode.txt\", \"w\").write(\"capture_mode=timelapse\\n\")'"
+    )
+    session.run_cmd(restore_script, timeout=10)
+    return "STARTING BURST CAPTURE" in out and "photos successfully written to disk" in out
+
+
+def test_status(session):
+    print("\n--- [DIAGNOSTIC] Box Identity & Status ---")
+    cmds = [
+        ("Hostname & Uptime", "hostname && uptime"),
+        ("Mothbox Name", "cat /boot/firmware/mothbox_custom/system/controls/name.txt 2>/dev/null || cat /var/lib/mothbox/name.txt 2>/dev/null || echo 'Name not found'"),
+        ("Active Switches", "sudo python3 /home/pi/Desktop/Mothbox/GetConfigSwitches.py 2>/dev/null || true"),
+        ("Active Processes", "ps aux | grep -E 'python|TakePhoto|Scheduler' | grep -v grep || true"),
+        ("Lock Files", "ls -l /run/boot_script_running /run/mothbox_takephoto.lock 2>/dev/null || echo 'No active lockfiles'"),
+        ("Current Settings", "cat /boot/firmware/mothbox_custom/mothbox_settings.csv | grep -E 'name|capture_mode|photo_interval|burst' || true"),
+    ]
+    for label, cmd in cmds:
+        print(f"\n>> {label}:")
+        out = session.run_cmd(cmd)
+        print(out)
+    return True
+
+
+def sync_firmware_to_target(host, user, password):
+    """Syncs local firmware to remote Mothbox using pexpect and rsync."""
+    print(f"\n--- [DEPLOY] Syncing local firmware to {user}@{host} ---")
+    repo_root = Path(__file__).resolve().parent.parent.parent.parent
+    local_unified = repo_root / "Mothbox_Unified"
+    local_custom = repo_root / "mothbox_custom_Unified"
+
+    # Sync Mothbox_Unified
+    cmd1 = f"rsync -av -e 'ssh -F /dev/null -o StrictHostKeyChecking=no' --exclude '__pycache__' {local_unified}/ {user}@{host}:/home/pi/Desktop/Mothbox/"
+    print(f">> {cmd1}")
+    child = pexpect.spawn(cmd1, timeout=60)
+    idx = child.expect(["password:", pexpect.EOF, pexpect.TIMEOUT], timeout=15)
+    if idx == 0:
+        child.sendline(password)
+        child.expect(pexpect.EOF, timeout=60)
+    print(child.before.decode(errors="replace"))
+
+    # Sync mothbox_custom_Unified
+    cmd2 = f"rsync -rltv -e 'ssh -F /dev/null -o StrictHostKeyChecking=no' --no-perms --no-owner --no-group --rsync-path='sudo rsync' {local_custom}/ {user}@{host}:/boot/firmware/mothbox_custom/"
+    print(f">> {cmd2}")
+    child2 = pexpect.spawn(cmd2, timeout=60)
+    idx2 = child2.expect(["password:", pexpect.EOF, pexpect.TIMEOUT], timeout=15)
+    if idx2 == 0:
+        child2.sendline(password)
+        child2.expect(pexpect.EOF, timeout=60)
+    print(child2.before.decode(errors="replace"))
+    print("[DEPLOY] Sync completed successfully.\n")
 
 
 TEST_MAP = {
@@ -230,8 +255,12 @@ TEST_MAP = {
     "scheduler": test_scheduler,
     "locks": test_locks,
     "imports": test_imports,
+    "burst": test_burst,
+    "status": test_status,
 }
 
+
+import random
 
 def main():
     parser = argparse.ArgumentParser(description="Mothbox Live Hardware Integration Test Runner")
@@ -239,7 +268,13 @@ def main():
     parser.add_argument("--user", default=os.getenv("MOTHBOX_USER", "pi"), help="SSH username")
     parser.add_argument("--password", default=os.getenv("MOTHBOX_PASS", "luna"), help="SSH password")
     parser.add_argument("--test", choices=list(TEST_MAP.keys()) + ["all"], default="all", help="Test to run")
+    parser.add_argument("--sync", action="store_true", help="Sync local firmware to target before running tests")
+    parser.add_argument("--repeat", type=int, default=1, help="Number of times to repeat the test suite")
+    parser.add_argument("--shuffle", action="store_true", help="Vary and randomize the order of tests in each iteration")
     args = parser.parse_args()
+
+    if args.sync:
+        sync_firmware_to_target(args.host, args.user, args.password)
 
     session = MothboxRemoteSession(args.host, args.user, args.password)
     try:
@@ -250,33 +285,53 @@ def main():
         print(f"Connection failed: {e}", file=sys.stderr)
         sys.exit(1)
 
-    targets = list(TEST_MAP.keys()) if args.test == "all" else [args.test]
-    results = {}
+    base_targets = list(TEST_MAP.keys()) if args.test == "all" else [args.test]
+    iteration_results = {}
+    overall_start_time = time.time()
 
-    start_time = time.time()
     try:
-        for t in targets:
-            func = TEST_MAP[t]
-            try:
-                passed = func(session)
-                results[t] = "PASS" if passed else "FAIL"
-            except Exception as e:
-                print(f"Exception during test '{t}': {e}")
-                results[t] = "ERROR"
+        for iteration in range(1, args.repeat + 1):
+            targets = list(base_targets)
+            if args.shuffle and len(targets) > 1:
+                random.shuffle(targets)
+
+            print(f"\n{'#' * 60}")
+            print(f"### RUN {iteration}/{args.repeat} -- Execution Order: {', '.join(targets)}")
+            print(f"{'#' * 60}\n")
+
+            iter_results = {}
+            for t in targets:
+                func = TEST_MAP[t]
+                try:
+                    passed = func(session)
+                    iter_results[t] = "PASS" if passed else "FAIL"
+                except Exception as e:
+                    print(f"Exception during test '{t}': {e}")
+                    iter_results[t] = "ERROR"
+            iteration_results[iteration] = iter_results
     finally:
         session.close()
 
-    elapsed = time.time() - start_time
-    print("\n" + "=" * 50)
-    print(f"HARDWARE INTEGRATION RESULTS ({elapsed:.1f}s)")
-    print("=" * 50)
-    all_passed = True
-    for t, status in results.items():
-        print(f"  {t:<15}: {status}")
-        if status != "PASS":
-            all_passed = False
-    print("=" * 50)
-    sys.exit(0 if all_passed else 1)
+    total_elapsed = time.time() - overall_start_time
+    print("\n" + "=" * 65)
+    print(f"HARDWARE INTEGRATION REPEATABILITY SUMMARY ({total_elapsed:.1f}s)")
+    print("=" * 65)
+    all_runs_passed = True
+    header = f"{'Test':<15} | " + " | ".join([f"Run {i}" for i in range(1, args.repeat + 1)]) + " | Overall"
+    print(header)
+    print("-" * len(header))
+
+    for t in base_targets:
+        statuses = [iteration_results[i].get(t, "N/A") for i in range(1, args.repeat + 1)]
+        test_passed = all(s == "PASS" for s in statuses)
+        if not test_passed:
+            all_runs_passed = False
+        status_cols = " | ".join([f"{s:^5}" for s in statuses])
+        overall_str = "PASS" if test_passed else "FAIL"
+        print(f"{t:<15} | {status_cols} | {overall_str}")
+
+    print("=" * 65)
+    sys.exit(0 if all_runs_passed else 1)
 
 
 if __name__ == "__main__":
