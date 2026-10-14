@@ -71,6 +71,30 @@ class MothboxRemoteSession:
                 pass
             self.child = None
 
+    def get_boot_id(self):
+        """Returns the Linux kernel boot ID (/proc/sys/kernel/random/boot_id)."""
+        try:
+            out = self.run_cmd("cat /proc/sys/kernel/random/boot_id 2>/dev/null", timeout=10)
+            for line in out.splitlines():
+                line = line.strip()
+                if len(line) == 36 and line.count("-") == 4:
+                    return line
+        except Exception:
+            pass
+        return None
+
+    def get_uptime_s(self):
+        """Returns system uptime in seconds from /proc/uptime."""
+        try:
+            out = self.run_cmd("cat /proc/uptime 2>/dev/null", timeout=10)
+            for line in out.splitlines():
+                parts = line.strip().split()
+                if parts:
+                    return float(parts[0])
+        except Exception:
+            pass
+        return None
+
 
 def test_rails(session):
     print("\n--- [TEST] 12V Switched Power Rail ---")
@@ -292,6 +316,12 @@ def main():
     base_targets = list(TEST_MAP.keys()) if args.test == "all" else [args.test]
     iteration_results = {}
     overall_start_time = time.time()
+    
+    initial_boot_id = session.get_boot_id()
+    initial_uptime = session.get_uptime_s() or 0.0
+    print(f"\n[AUDIT] Target Initial Boot ID : {initial_boot_id}")
+    print(f"[AUDIT] Target Initial Uptime  : {initial_uptime:.1f}s\n")
+    power_faults = 0
 
     try:
         for iteration in range(1, args.repeat + 1):
@@ -305,6 +335,14 @@ def main():
 
             iter_results = {}
             for t in targets:
+                # Pre-test power continuity verification
+                pre_boot = session.get_boot_id()
+                if initial_boot_id and pre_boot and pre_boot != initial_boot_id:
+                    print(f"\n[FATAL POWER FAULT] Pre-test boot ID mismatch! ({initial_boot_id} -> {pre_boot})")
+                    power_faults += 1
+                    iter_results[t] = "POWER_RESET_FAIL"
+                    continue
+
                 func = TEST_MAP[t]
                 try:
                     passed = func(session)
@@ -312,6 +350,19 @@ def main():
                 except Exception as e:
                     print(f"Exception during test '{t}': {e}")
                     iter_results[t] = "ERROR"
+
+                # Post-test power continuity verification
+                post_boot = session.get_boot_id()
+                post_uptime = session.get_uptime_s() or 0.0
+                if initial_boot_id and post_boot and post_boot != initial_boot_id:
+                    print(f"\n[FATAL POWER FAULT] Post-test boot ID mismatch! Device rebooted during test '{t}'!")
+                    power_faults += 1
+                    iter_results[t] = "POWER_RESET_FAIL"
+                elif post_uptime < initial_uptime:
+                    print(f"\n[FATAL POWER FAULT] Uptime decreased during test '{t}' ({initial_uptime:.1f}s -> {post_uptime:.1f}s)!")
+                    power_faults += 1
+                    iter_results[t] = "POWER_RESET_FAIL"
+
             iteration_results[iteration] = iter_results
     finally:
         session.close()
@@ -335,6 +386,27 @@ def main():
         print(f"{t:<15} | {status_cols} | {overall_str}")
 
     print("=" * 65)
+    print("POWER INTEGRITY & CONTINUOUS UPTIME AUDIT:")
+    print(f"  Initial Boot ID               : {initial_boot_id}")
+    final_session = MothboxRemoteSession(args.host, args.user, args.password)
+    try:
+        final_session.connect()
+        final_boot_id = final_session.get_boot_id()
+        final_uptime = final_session.get_uptime_s() or 0.0
+        final_session.close()
+    except Exception:
+        final_boot_id = "UNREACHABLE"
+        final_uptime = 0.0
+
+    print(f"  Final Boot ID                 : {final_boot_id}")
+    print(f"  Uncommanded Reboots / Faults  : {power_faults}")
+    power_ok = (power_faults == 0) and (final_boot_id == initial_boot_id)
+    print(f"  Power Integrity Verification  : {'PASSED (Zero brownouts, 100% continuous uptime)' if power_ok else 'FAILED (Uncommanded reboot or manual wake occurred)'}")
+    print("=" * 65)
+
+    if not power_ok:
+        all_runs_passed = False
+
     sys.exit(0 if all_runs_passed else 1)
 
 

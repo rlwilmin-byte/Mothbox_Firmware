@@ -302,22 +302,21 @@ def run_cmd(cmd):
     """Run a shell command safely"""
     subprocess.run(cmd, shell=True, check=False)
 
-# The flash LEDs overheat if left on for more than about a minute. A dead
-# camera can make capture_request() block forever with the flash lit, so every
-# flashOn() also arms an INDEPENDENT watchdog: a detached shell timer that
-# runs Flash_Off.py after FLASH_WATCHDOG_S seconds unless flashOff() cancels
-# it first. It lives in its own session, so it survives this process hanging
-# in a C call, being killed, or crashing.
-FLASH_WATCHDOG_S = 45
+# The flash LEDs overheat if left on for more than about a minute, and on low
+# battery packs a continuous flash (>1s) causes instantaneous voltage sag that
+# trips the PMIC into an unrecoverable halt (red LED). To prevent brownouts and
+# hardware damage, the hard watchdog limit is strictly bounded to 3 seconds.
+FLASH_WATCHDOG_S = 3
 _flash_watchdog = None
 
-def _arm_flash_watchdog():
+def _arm_flash_watchdog(timeout_s=None):
     global _flash_watchdog
     _disarm_flash_watchdog()
+    t = timeout_s if timeout_s is not None else FLASH_WATCHDOG_S
     try:
         _flash_watchdog = subprocess.Popen(
             ["/bin/sh", "-c",
-             f"sleep {FLASH_WATCHDOG_S}; echo '[TakePhoto] FLASH WATCHDOG fired -- forcing flash off'; "
+             f"sleep {t}; echo '[TakePhoto] FLASH WATCHDOG fired ({t}s) -- forcing flash off'; "
              f"python /home/pi/Desktop/Mothbox/Flash_Off.py"],
             start_new_session=True)
     except Exception as e:
@@ -345,15 +344,27 @@ def flashOff():
     _disarm_flash_watchdog()
     print("Flash Off\n")
 
-def flashOn():
+def flashOn(max_duration_s=None):
+    # Pre-flash voltage gate: query INA219/INA260 to inhibit flash if battery is critically low
+    if mothbox_hw is not None:
+        try:
+            pwr = mothbox_hw.read_power()
+            v = pwr.get("voltage_v", -1.0)
+            if 0.0 < v < 11.4:
+                print(f"[TakePhoto] WARNING: Battery voltage ({v:.2f}V < 11.4V cutoff) -- INHIBITING FLASH to prevent PMIC halt/brownout!")
+                return False
+        except Exception as e:
+            print(f"[TakePhoto] Voltage check error ({e}) -- proceeding with caution.")
+
     if mothbox_hw is not None:
         mothbox_hw.attract_on()      # also raises the shared 12V rail
         mothbox_hw.flash_on()
     else:
         run_cmd("python /home/pi/Desktop/Mothbox/Attract_On.py")
         run_cmd("python /home/pi/Desktop/Mothbox/Flash_On.py")
-    _arm_flash_watchdog()
+    _arm_flash_watchdog(timeout_s=max_duration_s)
     print("Flash On\n")
+    return True
 
 def is_csv_valid(filepath):
     if not os.path.exists(filepath):
@@ -582,7 +593,19 @@ def run_calibration():
 
     print("!!! Autofocusing !!!")
     afstart = time.time()
-    flashOn()
+    use_flash_for_af = True
+    if mothbox_hw is not None:
+        try:
+            pwr = mothbox_hw.read_power()
+            v = pwr.get("voltage_v", -1.0)
+            if 0.0 < v < 11.8:
+                print(f"[TakePhoto] Battery voltage ({v:.2f}V < 11.8V) -- using attractor lights for AF to avoid extended flash brownout.")
+                use_flash_for_af = False
+                mothbox_hw.attract_on()
+        except Exception:
+            pass
+    if use_flash_for_af:
+        flashOn(max_duration_s=4.0)
     start_camera_or_warn(show_preview=False)
     #picam2.start()
     
@@ -798,7 +821,7 @@ def takePhoto_Manual():
 
         time.sleep(exposureset_delay)#need some time for the settings to sink into the camera)
         
-        flashOn()
+        flashOn(max_duration_s=2.5)
         try:
             try:
                 # Bounded wait: a camera that "started" but delivers no frames
@@ -1026,7 +1049,7 @@ def takePhoto_Burst(burst_count=8, interval_s=6.0):
         print(f"[Burst] Capturing frame {k + 1}/{burst_count} (target={k * interval_s:.1f}s, actual={elapsed_shot:.2f}s)...")
 
         # Pulse flash for this frame only
-        flashOn()
+        flashOn(max_duration_s=0.5)
         try:
             try:
                 request = picam2.capture_request(flush=True, wait=CAPTURE_TIMEOUT_S)
