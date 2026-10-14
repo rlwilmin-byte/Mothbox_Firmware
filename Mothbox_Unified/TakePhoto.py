@@ -345,13 +345,16 @@ def flashOff():
     print("Flash Off\n")
 
 def flashOn(max_duration_s=None):
-    # Pre-flash voltage gate: query INA219/INA260 to inhibit flash if battery is critically low
+    # Pre-flash voltage gate: query INA219/INA260 to inhibit flash if battery is critically low.
+    # Short burst pulses (<=1.0s) are safe down to 10.5V; longer pulses use a stricter 11.4V cutoff.
     if mothbox_hw is not None:
         try:
             pwr = mothbox_hw.read_power()
             v = pwr.get("voltage_v", -1.0)
-            if 0.0 < v < 11.4:
-                print(f"[TakePhoto] WARNING: Battery voltage ({v:.2f}V < 11.4V cutoff) -- INHIBITING FLASH to prevent PMIC halt/brownout!")
+            cutoff_v = 11.4 if (max_duration_s is None or max_duration_s > 1.0) else 10.5
+            if 0.0 < v < cutoff_v:
+                print(f"[TakePhoto] WARNING: Battery voltage ({v:.2f}V < {cutoff_v:.1f}V cutoff) -- INHIBITING FLASH to prevent PMIC halt/brownout!")
+                mothbox_hw.attract_on()
                 return False
         except Exception as e:
             print(f"[TakePhoto] Voltage check error ({e}) -- proceeding with caution.")
