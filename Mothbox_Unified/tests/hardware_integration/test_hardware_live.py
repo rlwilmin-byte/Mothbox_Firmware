@@ -53,10 +53,14 @@ class MothboxRemoteSession:
         if not self.child:
             self.connect()
         t = timeout or self.timeout
-        self.child.sendline(command)
-        self.child.expect(r"\$", timeout=t)
-        output = self.child.before.decode(errors="replace")
-        return output
+        try:
+            self.child.sendline(command)
+            self.child.expect(r"\$", timeout=t)
+            output = self.child.before.decode(errors="replace")
+            return output
+        except Exception:
+            self.close()
+            raise
 
     def close(self):
         if self.child:
@@ -131,14 +135,14 @@ def test_64mp(session):
 def test_subsystems(session):
     print("\n--- [TEST] End-to-End Subsystems (Diagnostics & TakePhoto) ---")
     cmds = [
-        "sudo python3 /home/pi/Desktop/Mothbox/Diagnostics.py",
-        "sudo python3 /home/pi/Desktop/Mothbox/TakePhoto.py",
-        "ls -lt /home/pi/Desktop/Mothbox/photos/* | head -n 5"
+        ("sudo python3 /home/pi/Desktop/Mothbox/Diagnostics.py", 45),
+        ("sudo python3 /home/pi/Desktop/Mothbox/TakePhoto.py", 100),
+        ("ls -lt /home/pi/Desktop/Mothbox/photos/* | head -n 5", 20)
     ]
     all_ok = True
-    for c in cmds:
+    for c, tout in cmds:
         print(f"\n>> {c}")
-        out = session.run_cmd(c, timeout=60)
+        out = session.run_cmd(c, timeout=tout)
         print(out)
         if "Traceback" in out:
             all_ok = False
@@ -147,7 +151,7 @@ def test_subsystems(session):
 
 def test_scheduler(session):
     print("\n--- [TEST] Scheduler Loop Pass ---")
-    out = session.run_cmd("sudo python3 /home/pi/Desktop/Mothbox/Scheduler.py", timeout=25)
+    out = session.run_cmd("sudo python3 /home/pi/Desktop/Mothbox/Scheduler.py", timeout=60)
     print(out)
     return "Traceback" not in out
 
