@@ -1232,11 +1232,13 @@ def run_shutdown_pi5_FAST():
     if should_update_display("shutdown", settings, current_mode, next_epoch=next_epoch_time):
         log_info("Updating ePaper display before shutdown (if available)...")
         run_helper("/home/pi/Desktop/Mothbox/UpdateDisplay.py", "UpdateDisplay error")
+        time.sleep(2)
     else:
         log_info(f"Skipping ePaper display update before shutdown (epaper_mode={get_epaper_mode(settings)}).")
 
     atomic_update_kv(os.path.join(CONTROL_ROOT, "last_shutdown_epoch.txt"), "last_shutdown_epoch", str(time.time()))
 
+    time.sleep(1)
     # subprocess.run(["python", "/home/pi/Desktop/Mothbox/TurnEverythingOff.py"])
     os.system("sudo shutdown -h now")
 
