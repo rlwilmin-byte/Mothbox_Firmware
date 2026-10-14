@@ -1231,6 +1231,12 @@ def run_shutdown_pi5_FAST():
 
     if should_update_display("shutdown", settings, current_mode, next_epoch=next_epoch_time):
         log_info("Updating ePaper display before shutdown (if available)...")
+        if mothbox_hw is not None:
+            try:
+                mothbox_hw.attract_off()
+                mothbox_hw.rail_12v(False)
+            except Exception:
+                pass
         run_helper("/home/pi/Desktop/Mothbox/UpdateDisplay.py", "UpdateDisplay error")
         time.sleep(2)
     else:
@@ -2339,6 +2345,12 @@ else:
 log_section("LAUNCH -- Display")
 if should_update_display("boot", settings, mode):
     log_info("Updating ePaper display (if available)...")
+    if mothbox_hw is not None:
+        try:
+            mothbox_hw.attract_off()
+            mothbox_hw.rail_12v(False)
+        except Exception:
+            pass
     run_helper("/home/pi/Desktop/Mothbox/UpdateDisplay.py", "Display error")
 else:
     log_info(f"Skipping ePaper display update (epaper_mode={get_epaper_mode(settings)} in mode={mode}).")

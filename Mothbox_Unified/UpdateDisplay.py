@@ -428,6 +428,15 @@ print(f"Voltage: {voltage:.2f}V  →  {percent:.0f}%")
 try:
     logging.info("Mothbox Epaper Display")
     
+    # Isolate 12V rail and pull attractor gates LOW so SPI0 data signals on
+    # GPIO 7 (SPI CE1 / CHEXT) and GPIO 9 (SPI MISO / CH3) cannot switch LED MOSFETs
+    try:
+        import mothbox_hw
+        mothbox_hw.attract_off()
+        mothbox_hw.rail_12v(False)
+    except Exception:
+        pass
+
     epd = epd2in13_V4.EPD()
     logging.info("init and Clear")
     epd.init()
