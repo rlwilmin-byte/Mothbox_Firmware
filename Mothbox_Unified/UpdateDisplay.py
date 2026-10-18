@@ -425,6 +425,14 @@ else:
     percent = -1  # will trigger the UNKNOWN display branch...
 print(f"Voltage: {voltage:.2f}V  →  {percent:.0f}%")
 
+# Low-voltage brownout safety gate:
+# The Pi 5 PMIC undervoltage reset floor is ~8.8V. A 9.8V cutoff prevents brownouts
+# when driving ePaper charge pumps on depleted packs, while avoiding over-cautious
+# cutoffs (e.g. 11.0V) that would block morning summary updates on healthy packs.
+if 0.0 < voltage < 9.8:
+    print(f"[UpdateDisplay] Battery voltage ({voltage:.2f}V < 9.8V floor) is critically low -- skipping ePaper refresh to prevent PMIC brownout.")
+    sys.exit(0)
+
 try:
     logging.info("Mothbox Epaper Display")
     

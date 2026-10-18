@@ -112,38 +112,76 @@ def configure_display_for_mode(mode):
 
 def get_epaper_mode(settings_dict):
     """
-    Returns normalized epaper_mode: 'always', 'sparse', or 'never'.
-    Defaults to 'always' for full backward compatibility.
+    Returns normalized epaper_mode: 'sparse' (default), 'always', or 'never'.
+    Defaults to 'sparse' to eliminate nocturnal brownout loops during field deployments.
     """
     if not isinstance(settings_dict, dict):
-        return "always"
-    val = str(settings_dict.get("epaper_mode", settings_dict.get("enable_epaper", "always"))).strip().lower()
-    if val in ("sparse", "2"):
         return "sparse"
+    val = str(settings_dict.get("epaper_mode", settings_dict.get("enable_epaper", "sparse"))).strip().lower()
+    if val in ("always", "1", "true", "on"):
+        return "always"
     if val in ("never", "0", "false", "off"):
         return "never"
-    return "always"
+    return "sparse"
 
 
-def should_update_display(event, settings_dict, current_mode, next_epoch=None):
+def should_update_display(event, settings_dict, current_mode, next_epoch=None, now_dt=None):
     """
     Determines whether to update the ePaper display:
-      - 'always': updates on every event.
-      - 'never':  only updates in DEBUG, PARTY, or OFF mode.
-      - 'sparse': updates in DEBUG/PARTY/OFF, plus:
-                  - on boot: if first boot of the daily cycle (>2h since last shutdown) or manual wake.
-                  - on shutdown: if final shutdown of the cycle (>2h sleep until next wake).
+      - Physical operator modes ('DEBUG', 'PARTY', 'OFF'): always updates display.
+      - 'never': only updates in DEBUG, PARTY, or OFF mode.
+      - 'always': updates on every boot and shutdown, unless battery is critically depleted (<9.8V).
+      - 'sparse' (default):
+          * Nocturnal Blackout (18:00 - 06:00): ZERO ePaper refreshes during active night
+            capture hours, preserving battery and preventing PMIC brownouts.
+          * Daytime (06:00 - 18:00):
+              - On shutdown: refreshes at dawn (final sleep of cycle, >2h sleep until next wake)
+                to present the night's summary to morning field operators.
+              - On boot: refreshes on daily first boot (>2h since last shutdown) or manual wake.
     """
     if current_mode in ("DEBUG", "PARTY", "OFF"):
         return True
 
+    # 1. Low-voltage brownout safety gate (<9.8V PMIC safety floor)
+    # The Pi 5 PMIC undervoltage reset floor is ~8.8V. A 9.8V cutoff prevents brownouts
+    # on depleted packs while avoiding over-cautious cutoffs (e.g. 11.0V) that block morning updates.
+    if mothbox_hw is not None:
+        try:
+            pwr = mothbox_hw.read_power()
+            v = float(pwr.get("voltage_v", -1))
+            if 0.0 < v < 9.8:
+                log_warn(f"[Scheduler] Battery voltage ({v:.2f}V < 9.8V floor) -- suppressing ePaper update to prevent brownout.")
+                return False
+        except Exception:
+            pass
+
     ep_mode = get_epaper_mode(settings_dict)
-    if ep_mode == "always":
-        return True
     if ep_mode == "never":
         return False
+    if ep_mode == "always":
+        return True
 
     # ep_mode == 'sparse'
+    dt = now_dt or datetime.now()
+
+    # 2. Nocturnal blackout (18:00 to 06:00):
+    # During nighttime capture hours, field displays provide zero human value and
+    # risk brownouts/delays during photo sessions.
+    if dt.year >= 2024:
+        is_night = (dt.hour >= 18 or dt.hour < 6)
+        if is_night:
+            log_info(f"ePaper sparse mode: nocturnal blackout active ({dt.strftime('%H:%M')} in 18:00-06:00) -- skipping display refresh.")
+            return False
+
+    # 3. Daytime (06:00 to 18:00):
+    if event == "shutdown":
+        if next_epoch is not None:
+            now_epoch = time.time()
+            sleep_duration = next_epoch - now_epoch
+            # If sleep duration > 2 hours, this is the final sleep of the night session (morning summary)
+            return sleep_duration > 7200
+        return True
+
     if event == "boot":
         try:
             last_shutdown_str = read_control("last_shutdown_epoch", "0")
@@ -153,14 +191,6 @@ def should_update_display(event, settings_dict, current_mode, next_epoch=None):
             return last_shutdown == 0 or time_since_shutdown > 7200
         except Exception:
             return True
-
-    if event == "shutdown":
-        if next_epoch is not None:
-            now_epoch = time.time()
-            sleep_duration = next_epoch - now_epoch
-            # If sleep duration > 2 hours, this is the final sleep of the night session
-            return sleep_duration > 7200
-        return True
 
     return True
 
@@ -592,7 +622,7 @@ SETTING_DEFAULTS = {
     "bat_Wh":       10.0,
     "bat_80perVolts": 2.0,
     "bat_20perVolts": 1.0,
-    "epaper_mode":  "always",
+    "epaper_mode":  "sparse",
     "enable_gps":   False,
 }
 
