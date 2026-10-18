@@ -1143,6 +1143,7 @@ def run_shutdown_pi5():
         log_info(f"Skipping ePaper display update before shutdown (epaper_mode={get_epaper_mode(settings)}).")
 
     atomic_update_kv(os.path.join(CONTROL_ROOT, "last_shutdown_epoch.txt"), "last_shutdown_epoch", str(time.time()))
+    atomic_update_kv(os.path.join(CONTROL_ROOT, "shutdown_state.txt"), "shutdown_state", "clean")
 
     log_info("Shutting down in ~4 seconds...")
     time.sleep(1)
@@ -1243,6 +1244,7 @@ def run_shutdown_pi5_FAST():
         log_info(f"Skipping ePaper display update before shutdown (epaper_mode={get_epaper_mode(settings)}).")
 
     atomic_update_kv(os.path.join(CONTROL_ROOT, "last_shutdown_epoch.txt"), "last_shutdown_epoch", str(time.time()))
+    atomic_update_kv(os.path.join(CONTROL_ROOT, "shutdown_state.txt"), "shutdown_state", "clean")
 
     time.sleep(1)
     # subprocess.run(["python", "/home/pi/Desktop/Mothbox/TurnEverythingOff.py"])
@@ -1942,11 +1944,54 @@ except Exception as _e:
         return p
 os.makedirs(CONTROL_ROOT, exist_ok=True)
 
+# --------------------------------------------------------------------
+# Clean Flight & Crash Recovery Guard
+# --------------------------------------------------------------------
+shutdown_state_file = os.path.join(CONTROL_ROOT, "shutdown_state.txt")
+last_state = read_control("shutdown_state", "clean")
+if last_state != "clean":
+    log_warn("⚠️  Previous shutdown was NOT clean (unexpected crash, brownout, or power cut).")
+    
+    # 1. Break brownout death loop if battery is depleted
+    if mothbox_hw is not None:
+        try:
+            pwr = mothbox_hw.read_power()
+            v_rec = float(pwr.get("voltage_v", -1))
+            if 0 < v_rec < 10.8:
+                log_warn(f"[CRASH_RECOVERY] Battery voltage is critically low ({v_rec:.2f}V < 10.8V). "
+                         f"Aborting active session to prevent PMIC brownout crash loop.")
+                atomic_update_kv(os.path.join(CONTROL_ROOT, "mode.txt"), "mode", "STANDBY")
+                run_script("/home/pi/Desktop/Mothbox/Diagnostics.py", "Standby_Check", show_output=True)
+                run_shutdown_pi5_FAST()
+                sys.exit(0)
+        except Exception as e:
+            log_warn(f"[CRASH_RECOVERY] Battery voltage pre-check error ({e}) -- proceeding.")
+
+    # 2. Heal read-only filesystem mounts if Linux protected corrupted drives
+    try:
+        if os.path.exists("/proc/mounts"):
+            with open("/proc/mounts", "r") as mf:
+                for line in mf:
+                    parts = line.strip().split()
+                    if len(parts) >= 4 and parts[1].startswith("/media/"):
+                        opts = parts[3].split(",")
+                        if "ro" in opts:
+                            dev_node = parts[0]
+                            mp_path = parts[1]
+                            log_warn(f"[CRASH_RECOVERY] {mp_path} mounted READ-ONLY after crash. Attempting remount rw...")
+                            subprocess.run(["sudo", "mount", "-o", "remount,rw", mp_path], check=False, timeout=10)
+    except Exception as e:
+        log_warn(f"[CRASH_RECOVERY] Mount check error ({e}).")
+
+# Arm crash detection for this boot: if power cuts unexpectedly, next boot detects it
+atomic_update_kv(shutdown_state_file, "shutdown_state", "dirty")
+
 # Safe defaults -- will be properly set after switch reading
 use_switch_schedule = False
 switch_schedule = {}
 
 usersettingsFpath="/boot/firmware/mothbox_custom/mothbox_settings.csv"
+
 
 
 

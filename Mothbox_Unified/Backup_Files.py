@@ -187,17 +187,6 @@ backedup_photos_folder = desktop_path / "photos_backedup"
 
 backup_folder_name = "photos_backup_"+computerName
 
-if FINAL_BACKUP:
-    print("Final end-of-session backup requested -- skipping interval throttle.")
-elif not is_backup_due():
-    print(f"Backup not due yet (interval={get_backup_interval()} min). Skipping.")
-    sys.exit(0)
-
-print("----------------- STARTING BACKUP FILES-------------------")
-now = datetime.now()
-formatted_time = now.strftime("%Y-%m-%d %H:%M:%S")  # Adjust the format as needed
-
-print(f"Current time: {formatted_time}")
 
 def get_storage_info(path):
     """
@@ -585,21 +574,155 @@ def remove_empty_dirs(folder):
 
 def purge_oldest_backedup_until_threshold(folder, target_free_bytes):
     """
-    Delete oldest dated subdirs from photos_backedup/ one at a time until
+    Delete oldest dated subdirs or files from photos_backedup/ one at a time until
     SD card free space reaches target_free_bytes.
     Only call this when external storage is confirmed connected.
     Never touches photos/ (fresh, unbackedup data).
     """
     if not os.path.exists(folder):
         return
-    subdirs = sorted([d for d in Path(folder).iterdir() if d.is_dir()])
-    for subdir in subdirs:
+    items = sorted(Path(folder).iterdir(), key=lambda p: p.stat().st_mtime)
+    for item in items:
         _, current_free = get_storage_info(desktop_path)
         if current_free >= target_free_bytes:
             break
-        dir_size = get_dir_size(subdir)
-        shutil.rmtree(subdir)
-        print(f"Purged oldest backed-up folder: {subdir} ({dir_size/1e9:.2f} GB freed)")
+        if item.is_dir():
+            dir_size = get_dir_size(item)
+            shutil.rmtree(item)
+            print(f"Purged oldest backed-up folder: {item} ({dir_size/1e9:.2f} GB freed)")
+        elif item.is_file():
+            file_size = item.stat().st_size
+            item.unlink()
+            print(f"Purged oldest backed-up file: {item.name} ({file_size/1e6:.1f} MB freed)")
+
+
+MAX_BATCH_BYTES = int(1.2 * 1024**3)  # ~1.2 GB per backup run (safely transfers in ~15-25s)
+SAFETY_MARGIN_BYTES = 50 * 1024 * 1024  # 50 MB safety cushion on external drive
+
+
+def reclaim_orphaned_rec_files(disk_path, min_free_bytes=5 * 1024**3):
+    """
+    Scans for FSCK*.REC or *.rec files in the root of the external drive.
+    If available space is less than min_free_bytes, removes orphaned .REC
+    files to restore usable drive capacity for live backups.
+    If space is ample, moves them to a quarantine directory '/.fsck_salvage/'.
+    """
+    disk_path = Path(disk_path)
+    rec_set = set(disk_path.glob("FSCK*.REC")).union(disk_path.glob("fsck*.rec")).union(disk_path.glob("*.REC"))
+    rec_files = sorted(rec_set)
+    if not rec_files:
+
+        return 0
+
+    total_rec_bytes = sum(f.stat().st_size for f in rec_files if f.is_file())
+    _, avail_bytes = get_storage_info(disk_path)
+    print(f"[Backup] Found {len(rec_files)} orphaned .REC files ({total_rec_bytes / 1e9:.2f} GB) on {disk_path}")
+
+    reclaimed_bytes = 0
+    if avail_bytes < min_free_bytes or avail_bytes < total_rec_bytes:
+        print(f"[Backup] External free space ({avail_bytes / 1e9:.2f} GB) is constrained. Purging orphaned .REC files to restore capacity...")
+        for rf in rec_files:
+            try:
+                sz = rf.stat().st_size
+                rf.unlink()
+                reclaimed_bytes += sz
+            except Exception as e:
+                print(f"[Backup] Error deleting {rf}: {e}")
+        print(f"[Backup] Successfully reclaimed {reclaimed_bytes / 1e9:.2f} GB from orphaned .REC files.")
+    else:
+        salvage_dir = disk_path / ".fsck_salvage"
+        salvage_dir.mkdir(exist_ok=True)
+        for rf in rec_files:
+            try:
+                shutil.move(str(rf), str(salvage_dir / rf.name))
+            except Exception:
+                pass
+        print(f"[Backup] Quarantined {len(rec_files)} .REC files into {salvage_dir}")
+
+    return reclaimed_bytes
+
+
+def incremental_backup_photos(source_dir, dest_root, backedup_dir, max_bytes=MAX_BATCH_BYTES):
+    """
+    Transfers files iteratively up to max_bytes.
+    As each individual photo is copied and verified, it is immediately moved
+    to backedup_dir.
+    If ENOSPC or out of space occurs, aborts immediately without hanging.
+    Returns (num_copied, total_bytes_copied, disk_full_flag).
+    """
+    source_path = Path(source_dir)
+    dest_path = Path(dest_root)
+    backedup_path = Path(backedup_dir)
+
+    dest_path.mkdir(parents=True, exist_ok=True)
+    backedup_path.mkdir(parents=True, exist_ok=True)
+
+    all_files = []
+    for root, _, files in os.walk(str(source_path)):
+        for f in sorted(files):
+            fp = Path(root) / f
+            if fp.is_file():
+                all_files.append(fp)
+
+    if not all_files:
+        print("[Backup] No photos in photos/ pending backup.")
+        return 0, 0, False
+
+    total_needed_all = sum(f.stat().st_size for f in all_files)
+    print(f"[Backup] Total photos pending backup: {len(all_files)} files ({total_needed_all / 1e9:.2f} GB)")
+
+    copied_count = 0
+    copied_bytes = 0
+    disk_full = False
+
+    for src_file in all_files:
+        if copied_bytes >= max_bytes and not FINAL_BACKUP:
+            print(f"[Backup] Reached batch ceiling ({copied_bytes / 1e6:.1f} MB >= {max_bytes / 1e6:.1f} MB). Remaining files will transfer on next cycle.")
+            break
+
+        file_sz = src_file.stat().st_size
+
+        # Check destination free space
+        _, avail_bytes = get_storage_info(dest_path)
+        if avail_bytes < (file_sz + SAFETY_MARGIN_BYTES):
+            print(f"[Backup] Insufficient external space on {dest_path} for {src_file.name} "
+                  f"(need {file_sz / 1e6:.1f} MB + margin, available {avail_bytes / 1e6:.1f} MB). Stopping batch.")
+            disk_full = True
+            break
+
+        rel = src_file.relative_to(source_path)
+        target_file = dest_path / rel
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            shutil.copy2(str(src_file), str(target_file))
+        except OSError as e:
+            if getattr(e, 'errno', None) == 28:  # ENOSPC
+                print(f"[Backup] ENOSPC (disk full) during copy of {src_file.name}. Removing partial file.")
+                if target_file.exists():
+                    try:
+                        target_file.unlink()
+                    except Exception:
+                        pass
+                disk_full = True
+                break
+            else:
+                print(f"[Backup] Error copying {src_file.name}: {e}")
+                continue
+
+        if target_file.exists() and target_file.stat().st_size == file_sz:
+            backup_target = backedup_path / rel
+            backup_target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src_file), str(backup_target))
+            copied_count += 1
+            copied_bytes += file_sz
+        else:
+            print(f"[Backup] Verification failed for {src_file.name} -- leaving in source directory.")
+
+    remove_empty_dirs(source_path)
+    print(f"[Backup] Batch complete: {copied_count} photos moved to backup ({copied_bytes / 1e6:.1f} MB transferred).")
+    return copied_count, copied_bytes, disk_full
+
 
 
 def backup_and_delete(source_folder, destination_folder):
@@ -646,10 +769,22 @@ def backup_and_delete(source_folder, destination_folder):
 
 
 if __name__ == "__main__":
+    if FINAL_BACKUP:
+        print("Final end-of-session backup requested -- skipping interval throttle.")
+    elif not is_backup_due():
+        print(f"Backup not due yet (interval={get_backup_interval()} min). Skipping.")
+        sys.exit(0)
+
+    print("----------------- STARTING BACKUP FILES-------------------")
+    now = datetime.now()
+    formatted_time = now.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"Current time: {formatted_time}")
+
     # Check if "photos" folder exists
     if not os.path.exists(photos_folder):
         print("Photos folder not found, exiting.")
         exit(1)
+
 
     # Get total and available space on desktop
     desktop_total, desktop_available = get_storage_info(desktop_path)
@@ -696,49 +831,51 @@ if __name__ == "__main__":
         print("More than " + str(x) + "GB remain so original backed up files are kept")
 
     thingsworkedok = False
-    # Iterate through disks starting with the largest; back up to the first one with enough room
     for disk_name, capacity in sorted_disks:
         print("chosen Disk: " + str(disk_name))
-        total_available, external_available = capacity
+        
+        # 1. Audit and reclaim orphaned .REC files if space is constrained
+        reclaim_orphaned_rec_files(disk_name, min_free_bytes=5 * 1024**3)
+        
+        # 2. Refresh capacity
+        total_available, external_available = get_storage_info(disk_name)
         print("total available \t" + str(total_available/1000000000))
-        total_size_bytes = get_dir_size(photos_folder)
-        print("total needed \t\t" + str(total_size_bytes/1000000000))
-        if external_available > total_size_bytes:
-            external_backup_folder = disk_name / backup_folder_name
-            # Snapshot which files exist NOW before the copy starts.
-            # Any photo TakePhoto writes during the copy won't be in this set
-            # and will stay in photos/ safely for the next backup cycle.
-            files_to_move = snapshot_files(photos_folder)
-            print(f"doing the backup to external: {external_backup_folder}")
-            copy_folders_with_files(photos_folder, external_backup_folder)  # skips blank folders
-            print(f"Photos successfully copied to external backup folder: {external_backup_folder}")
+        print("external available \t" + str(external_available/1000000000))
+        
+        # 3. Check minimum buffer
+        if external_available < SAFETY_MARGIN_BYTES:
+            print(f"External storage {disk_name} has insufficient free space (<50MB). Trying next disk.")
+            continue
 
-            logfolder = "logs_" + computerName
-            external_logs_folder = disk_name / logfolder
+        external_backup_folder = disk_name / backup_folder_name
+        
+        # 4. Perform incremental backup
+        copied_cnt, copied_b, disk_full = incremental_backup_photos(
+            photos_folder, external_backup_folder, backedup_photos_folder
+        )
+        
+        # 5. Back up logs
+        logfolder = "logs_" + computerName
+        external_logs_folder = disk_name / logfolder
+        try:
             copy_photos_to_backup(logs_folder, external_logs_folder)
             print(f"Logs successfully copied to external backup folder: {external_logs_folder}")
+        except Exception as e:
+            print(f"Warning: could not copy logs to {external_logs_folder}: {e}")
 
-            differences = ""  # skipping verify
-            if differences:
-                print("Differences found:")
-                for difference in differences:
-                    print(difference)
-            else:
-                move_snapshot_files(files_to_move, photos_folder, backedup_photos_folder)
-                remove_empty_dirs(photos_folder)  # clean up empty dated subfolders left by move
-                print(f"Photos moved to internal backup folder: {backedup_photos_folder}")
+        # If at least some progress was made or no photos were pending, mark success
+        if not disk_full or copied_cnt > 0:
             thingsworkedok = True
-            if thingsworkedok:
-                break
-        else:
-            print("This External storage doesn't have enough space for backup.\n Trying next available storage if there is one ")
+            break
 
     if thingsworkedok == False:
         print("stuff never worked out with this backup, your files are not properly backedup")
-        # Non-zero so the Scheduler's final-backup step can log an honest result.
+        record_backup_done()  # Record attempt to enforce interval backoff (avoid 60s thrashing)
         sys.exit(2)
     else:
         record_backup_done()
         print("stuff worked out BACKUP COMPLETE")
     print("end")
-quit()
+
+
+
