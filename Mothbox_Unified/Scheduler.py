@@ -1296,8 +1296,11 @@ def run_shutdown_pi5(early_reason=None):
     # --- End first-boot guard ---
 
     # create lock
-    with open(BOOT_LOCK, "w") as f:
-        f.write("booting\n")
+    try:
+        with open(BOOT_LOCK, "w") as f:
+            f.write("booting\n")
+    except (PermissionError, OSError):
+        pass
 
     #-------------------#
 
@@ -1316,7 +1319,10 @@ def run_shutdown_pi5(early_reason=None):
             schedule.every(remaining_minutes).minutes.do(run_shutdown_pi5)
             # Release the boot lock so TakePhoto.py can continue capturing
             if os.path.exists(BOOT_LOCK):
-                os.remove(BOOT_LOCK)
+                try:
+                    os.remove(BOOT_LOCK)
+                except OSError:
+                    pass
             return
     else:
         log_info(f"Early shutdown active ({early_reason}) -- session window guard bypassed.")
@@ -1428,8 +1434,11 @@ def run_shutdown_pi5_FAST(early_reason=None):
     BOOT_LOCK = "/run/boot_script_running"
 
     # create lock
-    with open(BOOT_LOCK, "w") as f:
-        f.write("booting\n")
+    try:
+        with open(BOOT_LOCK, "w") as f:
+            f.write("booting\n")
+    except (PermissionError, OSError):
+        pass
 
     #-------------------#
 
@@ -1447,7 +1456,10 @@ def run_shutdown_pi5_FAST(early_reason=None):
             schedule.every(remaining_minutes).minutes.do(run_shutdown_pi5_FAST)
             # Release the boot lock so TakePhoto.py can continue capturing
             if os.path.exists(BOOT_LOCK):
-                os.remove(BOOT_LOCK)
+                try:
+                    os.remove(BOOT_LOCK)
+                except OSError:
+                    pass
             return
     elif early_reason:
         log_info(f"Early shutdown active ({early_reason}) -- session window guard bypassed.")
@@ -2696,7 +2708,10 @@ else:
 # Allow other scripts to be run by cron can be enabled. Run any time-sensitive sensor scripts before this (e.g. measure light)
 
 if os.path.exists(BOOT_LOCK):
-    os.remove(BOOT_LOCK)
+    try:
+        os.remove(BOOT_LOCK)
+    except OSError:
+        pass
 
 ###--------------------------------------###
 
