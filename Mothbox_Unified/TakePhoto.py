@@ -305,6 +305,11 @@ def trigger_early_shutdown(reason="storage_full_10_aborts"):
     Signals Scheduler.py to shut down early. If Scheduler.py is not running,
     invokes Scheduler.py --early-shutdown directly.
     """
+    current_mode = read_control(CONTROL_ROOT / "mode.txt", "mode", "ACTIVE")
+    if current_mode in ("DEBUG", "PARTY"):
+        print(f"[TakePhoto] In {current_mode} mode -- suppressing early shutdown ({reason}).")
+        return
+
     try:
         atomic_update_kv(EARLY_SHUTDOWN_FILE, "early_shutdown_reason", reason)
     except Exception as e:
@@ -1240,6 +1245,10 @@ x = extra_photo_storage_minimum
 print("Minimum storage needed: \t" + str(x * 1024**3))
 
 if desktop_available < x * 1024**3:  # x GB in bytes
+    current_mode = read_control(CONTROL_ROOT / "mode.txt", "mode", "ACTIVE")
+    if current_mode in ("DEBUG", "PARTY"):
+        print(f"[TakePhoto] Low storage in {current_mode} mode ({desktop_available / (1024**3):.2f} GB available < {x} GB minimum). Skipping capture, early shutdown suppressed.")
+        quit()
     aborted_count = int(read_control(ABORT_COUNTER_FILE, "consecutive_aborted_captures", 0)) + 1
     atomic_update_kv(ABORT_COUNTER_FILE, "consecutive_aborted_captures", str(aborted_count))
     print(f"[STORAGE ALERT] Not enough space to take more photos ({desktop_available / (1024**3):.2f} GB available < {x} GB minimum). Consecutive aborted captures: {aborted_count}/10")

@@ -2413,8 +2413,12 @@ log_info(f"Schedule source: {source_type}")
 
 
 
-# ----------END SWITCH CHECK----------------
-
+# Clear any transient early shutdown reason or abort counters on fresh boot
+for temp_f in ("early_shutdown_reason.txt", "consecutive_aborted_captures.txt"):
+    fp = os.path.join(CONTROL_ROOT, temp_f)
+    if os.path.exists(fp):
+        try: os.remove(fp)
+        except Exception: pass
 
 # Read UTC offset from new control layout
 utc_off = float(read_control("utc", 0))
