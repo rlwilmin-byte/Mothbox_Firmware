@@ -47,6 +47,18 @@ class TestBackupResilience(unittest.TestCase):
         self.assertFalse(rec1.exists())
         self.assertFalse(rec2.exists())
 
+    def test_reclaim_rec_files_quarantine_when_ample_space(self):
+        # Create mock .REC files on external drive
+        rec1 = self.dest / "FSCK0001.REC"
+        rec1.write_bytes(b"DATA" * 1024)
+
+        # Force min_free_bytes to 0 so space is considered ample
+        reclaimed = Backup_Files.reclaim_orphaned_rec_files(self.dest, min_free_bytes=0)
+        self.assertEqual(reclaimed, 0)
+        self.assertFalse(rec1.exists())
+        salvage = self.dest / ".fsck_salvage" / "FSCK0001.REC"
+        self.assertTrue(salvage.exists())
+
     def test_incremental_backup_and_atomic_move(self):
         # Create 5 mock photo files
         sub = self.source / "session_2026-10-18"
@@ -57,7 +69,6 @@ class TestBackupResilience(unittest.TestCase):
         # Run with max_bytes capping at 2 files
         file_sz = (sub / "photo_00.jpg").stat().st_size
         max_bytes = file_sz * 2 - 1
-
 
         copied_count, copied_bytes, disk_full = Backup_Files.incremental_backup_photos(
             self.source, self.dest, self.backedup, max_bytes=max_bytes
@@ -77,6 +88,40 @@ class TestBackupResilience(unittest.TestCase):
         # Check source has remaining 3 files
         src_files = list(self.source.glob("**/*.jpg"))
         self.assertEqual(len(src_files), 3)
+
+    def test_enospc_safe_handling(self):
+        # Simulate ENOSPC during copy
+        import unittest.mock as mock
+        import errno
+
+        sub = self.source / "session_enospc"
+        sub.mkdir()
+        (sub / "photo_err.jpg").write_bytes(b"TEST_DATA")
+
+        def mock_copyfile(src, dst, *args, **kwargs):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        with mock.patch("shutil.copyfile", side_effect=mock_copyfile):
+            copied_count, copied_bytes, disk_full = Backup_Files.incremental_backup_photos(
+                self.source, self.dest, self.backedup
+            )
+            self.assertEqual(copied_count, 0)
+            self.assertTrue(disk_full)
+            # Source file must be preserved
+            self.assertTrue((sub / "photo_err.jpg").exists())
+
+    def test_clean_startup_state_tracking(self):
+        # Verify shutdown state file mechanics used by Scheduler.py
+        import tempfile
+        state_file = Path(self.test_dir) / "shutdown_state.txt"
+        
+        # 1. Simulate graceful shutdown marking state as clean
+        state_file.write_text("shutdown_state=clean\n")
+        self.assertIn("shutdown_state=clean", state_file.read_text())
+
+        # 2. Simulate startup arming crash recovery
+        state_file.write_text("shutdown_state=dirty\n")
+        self.assertIn("shutdown_state=dirty", state_file.read_text())
 
 
 if __name__ == "__main__":

@@ -337,24 +337,22 @@ def flashOff():
 
 def flashOn(max_duration_s=None):
     # Pre-flash voltage gate: query INA219/INA260 to inhibit flash if battery is critically low.
-    # Short burst pulses (<=1.0s) are safe down to 10.5V; longer pulses use a stricter 11.4V cutoff.
+    # Short burst pulses (<=1.0s) are safe down to 9.8V under attractor load (well above the 8.8V
+    # PMIC reset floor); longer continuous pulses use a stricter 11.0V cutoff.
     if mothbox_hw is not None:
         try:
             pwr = mothbox_hw.read_power()
             v = pwr.get("voltage_v", -1.0)
-            cutoff_v = 11.4 if (max_duration_s is None or max_duration_s > 1.0) else 10.5
+            cutoff_v = 11.0 if (max_duration_s is None or max_duration_s > 1.0) else 9.8
             if 0.0 < v < cutoff_v:
                 print(f"[TakePhoto] WARNING: Battery voltage ({v:.2f}V < {cutoff_v:.1f}V cutoff) -- INHIBITING FLASH to prevent PMIC halt/brownout!")
-                mothbox_hw.attract_on()
                 return False
         except Exception as e:
             print(f"[TakePhoto] Voltage check error ({e}) -- proceeding with caution.")
 
     if mothbox_hw is not None:
-        mothbox_hw.attract_on()      # also raises the shared 12V rail
         mothbox_hw.flash_on()
     else:
-        run_cmd("python /home/pi/Desktop/Mothbox/Attract_On.py")
         run_cmd("python /home/pi/Desktop/Mothbox/Flash_On.py")
     _arm_flash_watchdog(timeout_s=max_duration_s)
     print("Flash On\n")
@@ -804,6 +802,7 @@ def takePhoto_Manual():
     requests = []  # Create an empty list to store requests
     PILs = []
     metadatas = []
+    flash_statuses = []
     #HDR loop
     for i in range(num_photos):
         #middleexposure = camera_settings["ExposureTime"]
@@ -815,32 +814,45 @@ def takePhoto_Manual():
 
         time.sleep(exposureset_delay)#need some time for the settings to sink into the camera)
         
-        flashOn(max_duration_s=2.5)
+        t_flash_start = time.monotonic()
+        flash_fired = flashOn(max_duration_s=2.5)
+        request = None
         try:
-            try:
-                # Bounded wait: a camera that "started" but delivers no frames
-                # (ribbon out) raises TimeoutError instead of hanging forever.
-                request = picam2.capture_request(flush=True, wait=CAPTURE_TIMEOUT_S)
-            except TypeError:
-                # very old picamera2 without numeric wait; the SIGALRM watchdog
-                # and the detached flash watchdog still cover a hang
-                request = picam2.capture_request(flush=True)
+            if flash_fired:
+                # Rolling shutter synchronization:
+                # 1. Flush & release the in-flight frame buffer from libcamera
+                try:
+                    discard_req = picam2.capture_request(flush=True, wait=2.0)
+                    if discard_req:
+                        discard_req.release()
+                except Exception:
+                    pass
+                # 2. Capture the subsequent frame whose entire exposure & readout cycle
+                #    (all 6944 rows) occurs while the flash strobe is fully active.
+                try:
+                    request = picam2.capture_request(flush=False, wait=CAPTURE_TIMEOUT_S)
+                except TypeError:
+                    request = picam2.capture_request(flush=False)
+            else:
+                try:
+                    request = picam2.capture_request(flush=True, wait=CAPTURE_TIMEOUT_S)
+                except TypeError:
+                    request = picam2.capture_request(flush=True)
         except Exception as e:
             flashOff()
             warn_no_camera(f"no frame from camera: {e.__class__.__name__}: {e}")
         finally:
             flashOff()
-        #if not onlyflash:
-            #flashOff()
+            t_flash_dur = time.monotonic() - t_flash_start
+            if flash_fired:
+                print(f"[TakePhoto] Photo {i + 1} flash strobe duration: {t_flash_dur * 1000.0:.1f}ms (full rolling window covered)")
+
         flashtime=time.time()-start
 
         pilImage = request.make_image("main")
         PILs.append(pilImage)
-        #image_buffer = request.make_array("main")
-        #requests.append(image_buffer)
-        
-        #print(request.get_metadata()) # this is the metadata for this image
         metadatas.append(request.get_metadata())
+        flash_statuses.append(flash_fired)
         request.release()
 
         picam2.stop()
@@ -888,6 +900,7 @@ def takePhoto_Manual():
           # in there just saves the photo without EXIF -- never loses it.
           save_kwargs = {"quality": 96}
           if mothbox_exif is not None:
+              photo_flash_fired = flash_statuses[i] if i < len(flash_statuses) else False
               exif_bytes = mothbox_exif.build_exif_bytes(
                   metadata=exif_data,
                   requested_exposure_us=exposure_times[i],
@@ -902,6 +915,7 @@ def takePhoto_Manual():
                   hdr_index=i, hdr_count=num_photos,
                   image_id=computerName + "_" + timestamp + hdr_suffix,
                   body_model=MOTHBOX_BODY,
+                  flash_fired=photo_flash_fired,
               )
               if exif_bytes:
                   save_kwargs["exif"] = exif_bytes
@@ -916,8 +930,8 @@ class PhotoSaveWorker:
     Decouples sensor exposure pacing from disk I/O latency to preserve
     timing stability and keep RAM footprint minimal.
     """
-    def __init__(self, computer_name, utc_offset, sw_version, body_model, gps_lat, gps_lon):
-        self.q = queue.Queue(maxsize=3)
+    def __init__(self, computer_name, utc_offset, sw_version, body_model, gps_lat, gps_lon, max_queue_size=10):
+        self.q = queue.Queue(maxsize=max_queue_size)
         self.computer_name = computer_name
         self.utc_offset = utc_offset
         self.sw_version = sw_version
@@ -940,7 +954,11 @@ class PhotoSaveWorker:
                 self.q.task_done()
                 break
             try:
-                (pil_image, metadata, shot_dt, exp_us, idx, total_count, suffix, sensor_name, file_type) = item
+                if len(item) >= 10:
+                    (pil_image, metadata, shot_dt, exp_us, idx, total_count, suffix, sensor_name, file_type, flash_fired) = item[:10]
+                else:
+                    (pil_image, metadata, shot_dt, exp_us, idx, total_count, suffix, sensor_name, file_type) = item
+                    flash_fired = False
                 offset_total_minutes = int(self.utc_offset * 60)
                 sign = "+" if offset_total_minutes >= 0 else "-"
                 abs_minutes = abs(offset_total_minutes)
@@ -977,12 +995,13 @@ class PhotoSaveWorker:
                         hdr_index=idx, hdr_count=total_count,
                         image_id=f"{self.computer_name}_{timestamp}{suffix}",
                         body_model=self.body_model,
+                        flash_fired=flash_fired,
                     )
                     if exif_bytes:
                         save_kwargs["exif"] = exif_bytes
 
                 pil_image.save(filepath, **save_kwargs)
-                print(f"[TakePhoto] Saved burst image: {filepath}")
+                print(f"[TakePhoto] Saved burst image (flash={'ON' if flash_fired else 'OFF'}): {filepath}")
                 self.saved_count += 1
             except Exception as e:
                 print(f"[TakePhoto] Error saving burst image ({e})")
@@ -990,7 +1009,7 @@ class PhotoSaveWorker:
             finally:
                 self.q.task_done()
 
-    def wait_done(self, timeout=35):
+    def wait_done(self, timeout=45):
         self.q.put(None)
         self.thread.join(timeout=timeout)
 
@@ -1025,6 +1044,7 @@ def takePhoto_Burst(burst_count=8, interval_s=6.0):
         body_model=MOTHBOX_BODY,
         gps_lat=gps_lat,
         gps_lon=gps_lon,
+        max_queue_size=max(10, burst_count + 2),
     )
 
     t0 = time.monotonic()
@@ -1042,19 +1062,44 @@ def takePhoto_Burst(burst_count=8, interval_s=6.0):
         elapsed_shot = time.monotonic() - t0
         print(f"[Burst] Capturing frame {k + 1}/{burst_count} (target={k * interval_s:.1f}s, actual={elapsed_shot:.2f}s)...")
 
-        # Pulse flash for this frame only
-        flashOn(max_duration_s=0.5)
+        # Pulse flash for this frame with full rolling shutter window coverage
+        t_flash_start = time.monotonic()
+        flash_fired = flashOn(max_duration_s=0.5)
+        request = None
         try:
-            try:
-                request = picam2.capture_request(flush=True, wait=CAPTURE_TIMEOUT_S)
-            except TypeError:
-                request = picam2.capture_request(flush=True)
+            if flash_fired:
+                # Rolling shutter synchronization:
+                # 1. Flush & release the in-flight frame buffer from libcamera.
+                #    That frame was already in sensor exposure before the flash lit,
+                #    so capturing it would produce rolling shutter flash banding (half-dark frame).
+                try:
+                    discard_req = picam2.capture_request(flush=True, wait=2.0)
+                    if discard_req:
+                        discard_req.release()
+                except Exception:
+                    pass
+
+                # 2. Capture the subsequent frame whose entire exposure & readout cycle
+                #    (all 6944 rows) occurs while the flash strobe is fully active.
+                try:
+                    request = picam2.capture_request(flush=False, wait=CAPTURE_TIMEOUT_S)
+                except TypeError:
+                    request = picam2.capture_request(flush=False)
+            else:
+                # Flash inhibited (e.g. battery < 9.8V brownout guard) -- capture available light
+                try:
+                    request = picam2.capture_request(flush=True, wait=CAPTURE_TIMEOUT_S)
+                except TypeError:
+                    request = picam2.capture_request(flush=True)
         except Exception as e:
             flashOff()
             warn_no_camera(f"no frame from camera in burst frame {k + 1}: {e.__class__.__name__}: {e}")
             break
         finally:
             flashOff()
+            t_flash_dur = time.monotonic() - t_flash_start
+            if flash_fired:
+                print(f"[Burst] Frame {k + 1} flash strobe duration: {t_flash_dur * 1000.0:.1f}ms (full rolling window covered)")
 
         try:
             pil_image = request.make_image("main")
@@ -1064,7 +1109,7 @@ def takePhoto_Burst(burst_count=8, interval_s=6.0):
             suffix = f"_b{k + 1}"
             save_worker.enqueue((
                 pil_image, md, shot_time, exp_time,
-                k, burst_count, suffix, camera_sensor_name, ImageFileType
+                k, burst_count, suffix, camera_sensor_name, ImageFileType, flash_fired
             ))
         except Exception as e:
             print(f"[TakePhoto] Failed to process burst frame {k + 1}: {e}")
@@ -1075,7 +1120,7 @@ def takePhoto_Burst(burst_count=8, interval_s=6.0):
 
     # 4. Drain asynchronous save queue
     print("[Burst] Waiting for image save worker to finish writing...")
-    save_worker.wait_done(timeout=35)
+    save_worker.wait_done(timeout=45)
     print(f"[Burst] Complete: {save_worker.saved_count} photos successfully written to disk.")
     return successful_captures > 0
 

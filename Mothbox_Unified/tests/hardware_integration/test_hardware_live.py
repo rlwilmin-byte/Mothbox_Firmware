@@ -273,6 +273,14 @@ def sync_firmware_to_target(host, user, password):
     print("[DEPLOY] Sync completed successfully.\n")
 
 
+def test_flash_sync(session):
+    print("\n--- [TEST] Rolling Shutter Flash Synchronization & Uniformity ---")
+    script = "sudo python3 /home/pi/Desktop/Mothbox/tests/hardware_integration/test_flash_sync_live.py --iterations 3"
+    out = session.run_cmd(script, timeout=60)
+    print(out)
+    return "RESULT: ALL FLASH SYNCHRONIZATION CHECKS PASSED!" in out
+
+
 TEST_MAP = {
     "rails": test_rails,
     "attract": test_attract,
@@ -284,6 +292,7 @@ TEST_MAP = {
     "locks": test_locks,
     "imports": test_imports,
     "burst": test_burst,
+    "flash_sync": test_flash_sync,
     "status": test_status,
 }
 

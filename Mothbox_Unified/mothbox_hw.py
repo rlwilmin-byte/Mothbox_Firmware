@@ -491,7 +491,7 @@ def attract_on(stagger_s=0.05):
         rail_12v(True)
         if stagger_s > 0:
             time.sleep(stagger_s)
-            for pin in (PRO["CH1"], PRO["CH2"], PRO["CH3"], PRO["CHEXT"], PRO["CHEXT_PCB_BUG_PIN"]):
+            for pin in (PRO["CH3"], PRO["CH2"], PRO["CH1"], PRO["CHEXT"], PRO["CHEXT_PCB_BUG_PIN"]):
                 _out(pin, True)
                 time.sleep(stagger_s)
         else:
