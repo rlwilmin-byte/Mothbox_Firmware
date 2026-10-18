@@ -289,6 +289,43 @@ def atomic_update_kv(path: Path, key: str, value):
 
     atomic_write(path, "".join(lines))
 
+ABORT_COUNTER_FILE = CONTROL_ROOT / "consecutive_aborted_captures.txt"
+EARLY_SHUTDOWN_FILE = CONTROL_ROOT / "early_shutdown_reason.txt"
+
+def reset_aborted_captures():
+    """Reset the consecutive aborted captures counter upon successful photo save."""
+    try:
+        if ABORT_COUNTER_FILE.exists():
+            atomic_update_kv(ABORT_COUNTER_FILE, "consecutive_aborted_captures", "0")
+    except Exception:
+        pass
+
+def trigger_early_shutdown(reason="storage_full_10_aborts"):
+    """
+    Signals Scheduler.py to shut down early. If Scheduler.py is not running,
+    invokes Scheduler.py --early-shutdown directly.
+    """
+    try:
+        atomic_update_kv(EARLY_SHUTDOWN_FILE, "early_shutdown_reason", reason)
+    except Exception as e:
+        print(f"[TakePhoto] Could not write early shutdown reason: {e}")
+
+    try:
+        if mothbox_hw is not None:
+            mothbox_hw.all_lights_off()
+    except Exception:
+        pass
+
+    try:
+        res = subprocess.run(["pgrep", "-f", "Mothbox/Scheduler.py"], capture_output=True, text=True)
+        if res.returncode == 0:
+            print(f"[TakePhoto] Signaled running Scheduler.py for early shutdown ({reason}).")
+        else:
+            print(f"[TakePhoto] Scheduler.py not running -- invoking Scheduler.py --early-shutdown directly ({reason}).")
+            subprocess.Popen(["python3", "/home/pi/Desktop/Mothbox/Scheduler.py", "--early-shutdown"])
+    except Exception as e:
+        print(f"[TakePhoto] Error triggering early shutdown: {e}")
+
 def run_cmd(cmd):
     """Run a shell command safely"""
     subprocess.run(cmd, shell=True, check=False)
@@ -921,6 +958,7 @@ def takePhoto_Manual():
                   save_kwargs["exif"] = exif_bytes
           img.save(filepath, **save_kwargs)
           print("Image saved to "+filepath)
+          reset_aborted_captures()
           i=i+1
 
 
@@ -1003,6 +1041,7 @@ class PhotoSaveWorker:
                 pil_image.save(filepath, **save_kwargs)
                 print(f"[TakePhoto] Saved burst image (flash={'ON' if flash_fired else 'OFF'}): {filepath}")
                 self.saved_count += 1
+                reset_aborted_captures()
             except Exception as e:
                 print(f"[TakePhoto] Error saving burst image ({e})")
                 self.error_count += 1
@@ -1178,18 +1217,35 @@ formatted_time = now.strftime("%Y-%m-%d %H:%M:%S")  # Adjust the format as neede
 print(f"Current time: {formatted_time}")
 
 
-#First check and see if we have enough storage left to keep taking photos, or else do nothing
+# 1. Critical battery voltage pre-check (<9.8V PMIC brownout safety floor)
+# Prevents taking captures or firing flashes when battery voltage is critically depleted.
+try:
+    if mothbox_hw is not None:
+        pwr = mothbox_hw.read_power()
+        v = float(pwr.get("voltage_v", -1))
+        if 0.0 < v < 9.8:
+            print(f"[CRITICAL] Battery voltage {v:.2f}V is below 9.8V brownout floor! Aborting capture to prevent brownout.")
+            trigger_early_shutdown(reason=f"critical_battery_{v:.2f}V")
+            quit()
+except Exception as e:
+    print(f"[TakePhoto] Battery pre-check exception: {e}")
+
+# 2. Storage availability check and 10-consecutive-abort guard
+# First check and see if we have enough storage left to keep taking photos, or else do nothing
 # Get total and available space on desktop and external storage
 desktop_total, desktop_available = get_storage_info(desktop_path)
 print("Desktop Total    Storage: \t" + str(desktop_total))
-
 print("Desktop Available Storage: \t" + str(desktop_available))
-x=extra_photo_storage_minimum
-
-print("Minimum storage needed: \t" +str(x * 1024**3))
+x = extra_photo_storage_minimum
+print("Minimum storage needed: \t" + str(x * 1024**3))
 
 if desktop_available < x * 1024**3:  # x GB in bytes
-    print("not enough space to take more photos")
+    aborted_count = int(read_control(ABORT_COUNTER_FILE, "consecutive_aborted_captures", 0)) + 1
+    atomic_update_kv(ABORT_COUNTER_FILE, "consecutive_aborted_captures", str(aborted_count))
+    print(f"[STORAGE ALERT] Not enough space to take more photos ({desktop_available / (1024**3):.2f} GB available < {x} GB minimum). Consecutive aborted captures: {aborted_count}/10")
+    if aborted_count >= 10:
+        print(f"[CRITICAL] Storage full: 10 consecutive capture attempts aborted. Initiating graceful early shutdown.")
+        trigger_early_shutdown(reason="storage_full_10_aborts")
     quit()
 
 

@@ -65,6 +65,8 @@ import glob
 import numpy as np
 import sys
 import schedule
+import psutil
+from pathlib import Path
 
 import crontab
 from crontab import CronTab
@@ -158,6 +160,23 @@ def should_update_display(event, settings_dict, current_mode, next_epoch=None, n
     ep_mode = get_epaper_mode(settings_dict)
     if ep_mode == "never":
         return False
+
+    # 2. Critical warning override:
+    # If a media issue (missing USB, read-only drive, full disk) or camera failure is present,
+    # override suppression so deployment operators are immediately alerted on-screen!
+    media_warn = str(read_control("media_warning", "")).strip()
+    cam_state = str(read_control("camera", "ok")).strip()
+    is_numeric = False
+    try:
+        if media_warn:
+            float(media_warn)
+            is_numeric = True
+    except (ValueError, TypeError):
+        pass
+    if (media_warn and not is_numeric) or cam_state.lower() == "missing":
+        log_warn(f"[Scheduler] Alert active (media='{media_warn}', camera='{cam_state}') -- forcing ePaper display update.")
+        return True
+
     if ep_mode == "always":
         return True
 
@@ -869,6 +888,150 @@ def get_control_values(filename):
     return control_values
 
 
+def check_media_health(mounts_file="/proc/mounts"):
+    """
+    Checks the health of SD card and external USB media on startup.
+    Conditions checked:
+      1. SD card filesystem mounted read-only (ro) -> attempts self-healing remount rw
+      2. External USB drive missing
+      3. External USB mounted read-only (ro) -> attempts self-healing remount rw
+      4. Low external USB storage (< 1.0 GB)
+      5. Low internal SD cushion (< 8.0 GB)
+      6. Orphaned .REC corruption files on external storage -> purges/quarantines them
+
+    If an issue is found:
+      - Writes issue description to CONTROL_ROOT / "media_warning.txt"
+      - Triggers one-time self-recovery reboot if an unrecoverable ro mount is detected
+      - Returns warning string (or None if all is well)
+    """
+    warning = None
+    media_warning_file = os.path.join(CONTROL_ROOT, "media_warning.txt")
+    reboot_file = os.path.join(CONTROL_ROOT, "media_reboot_attempted.txt")
+
+    # 1. Check rootfs '/' mount options
+    root_ro = False
+    try:
+        with open(mounts_file, "r") as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 4 and parts[1] == "/":
+                    opts = parts[3].split(",")
+                    if "ro" in opts:
+                        root_ro = True
+                    break
+    except Exception as e:
+        log_warn(f"Could not inspect /proc/mounts: {e}")
+
+    if root_ro:
+        log_warn("[MEDIA] SD card rootfs '/' is mounted READ-ONLY! Attempting self-healing remount rw...")
+        res = subprocess.run(["sudo", "mount", "-o", "remount,rw", "/"], capture_output=True, text=True)
+        if res.returncode == 0:
+            log_ok("[MEDIA] Successfully remounted rootfs rw.")
+            root_ro = False
+        else:
+            log_warn(f"[MEDIA] Rootfs remount rw failed: {res.stderr.strip()}")
+            warning = "SD READ-ONLY"
+
+    # 2. Check internal SD cushion (<8.0 GB)
+    sd_low = False
+    try:
+        sd_usage = shutil.disk_usage("/")
+        sd_free_gb = sd_usage.free / (1024**3)
+        if sd_free_gb < 8.0:
+            sd_low = True
+            log_warn(f"[MEDIA] Internal SD cushion low: {sd_free_gb:.2f} GB free (< 8.0 GB safety cushion).")
+    except Exception as e:
+        log_warn(f"Could not check SD usage: {e}")
+
+    # 3. Check external USB storage
+    usb_found = False
+    usb_ro = False
+    usb_low_space = False
+    largest_usb_path = None
+    largest_usb_free = 0
+
+    try:
+        for part in psutil.disk_partitions(all=False):
+            if (part.mountpoint.startswith("/media") or part.mountpoint.startswith("/mnt")) and "mmcblk" not in part.device:
+                try:
+                    usage = shutil.disk_usage(part.mountpoint)
+                    if usage.total == 0:
+                        continue  # skip 0GB ghost mount
+                    usb_found = True
+                    if usage.free > largest_usb_free:
+                        largest_usb_free = usage.free
+                        largest_usb_path = part.mountpoint
+
+                    # Check read-only option
+                    opts = part.opts.split(",")
+                    if "ro" in opts:
+                        log_warn(f"[MEDIA] USB drive {part.mountpoint} is mounted READ-ONLY! Attempting self-healing remount rw...")
+                        rem = subprocess.run(["sudo", "mount", "-o", "remount,rw", part.mountpoint], capture_output=True, text=True)
+                        if rem.returncode == 0:
+                            log_ok(f"[MEDIA] Successfully remounted USB {part.mountpoint} rw.")
+                        else:
+                            log_warn(f"[MEDIA] USB remount rw failed: {rem.stderr.strip()}")
+                            usb_ro = True
+                except Exception as pe:
+                    log_warn(f"Error checking partition {part.mountpoint}: {pe}")
+    except Exception as e:
+        log_warn(f"Error enumerating disk partitions: {e}")
+
+    if usb_found and largest_usb_path:
+        usb_free_gb = largest_usb_free / (1024**3)
+        if usb_free_gb < 1.0:
+            usb_low_space = True
+            log_warn(f"[MEDIA] USB storage nearly full: {usb_free_gb:.2f} GB free (< 1.0 GB).")
+
+        # Reclaim orphaned .REC files
+        try:
+            from Backup_Files import reclaim_orphaned_rec_files
+            reclaim_orphaned_rec_files(Path(largest_usb_path))
+        except Exception as re_err:
+            log_warn(f"Could not reclaim .REC files: {re_err}")
+
+    # Prioritize primary warning message
+    if root_ro:
+        warning = "SD READ-ONLY"
+    elif not usb_found:
+        warning = "NO USB DRIVE"
+    elif usb_ro:
+        warning = "USB READ-ONLY"
+    elif usb_low_space:
+        warning = "USB FULL"
+    elif sd_low:
+        warning = "SD CUSHION LOW"
+
+    # Self-heal reboot handler:
+    # If a filesystem is stuck in read-only mode, a single reboot allows fsck
+    # to repair dirty journals. Guarded against reboot loops via a state file.
+    if warning in ("SD READ-ONLY", "USB READ-ONLY"):
+        reboot_tried = read_control("media_reboot_attempted", "0")
+        if reboot_tried == "0":
+            log_warn(f"[MEDIA] Unrecoverable {warning} condition detected. Attempting one-time self-recovery reboot to trigger fsck...")
+            atomic_update_kv(reboot_file, "media_reboot_attempted", "1")
+            time.sleep(2)
+            os.system("sudo reboot")
+            sys.exit(0)
+    else:
+        # If media is healthy or error is not read-only, clear any old reboot attempt flag
+        if os.path.exists(reboot_file):
+            try: os.remove(reboot_file)
+            except Exception: pass
+
+    if warning:
+        log_section(f"MEDIA ALERT -- {warning}")
+        log_warn(f"Active media warning: {warning}. Operator intervention may be required.")
+        atomic_update_kv(media_warning_file, "media_warning", warning)
+    else:
+        log_ok("[MEDIA] All storage media healthy (SD cushion & USB verified).")
+        if os.path.exists(media_warning_file):
+            try: os.remove(media_warning_file)
+            except Exception: pass
+
+    return warning
+
+
 def schedule_shutdown(minutes):
     """Schedules the execution of shutdown after the specified delay in minutes."""
     if rpiModel == 4:
@@ -878,12 +1041,39 @@ def schedule_shutdown(minutes):
         schedule.every(minutes).minutes.do(run_shutdown_pi5)
 
     try:
+        last_voltage_check = time.time()
         while True:
             #control_values = get_control_values("/boot/firmware/mothbox_custom/system/controls.txt")
             shutdown_enabled = read_control("shutdown_enabled", "true").lower() == "true"
             if not shutdown_enabled:
                 print("Shutdown scheduling stopped.")
                 break
+
+            # 1. Early shutdown request check (e.g. 10 capture aborts or critical battery)
+            early_reason = read_control("early_shutdown_reason", "")
+            if early_reason:
+                log_section(f"EARLY SHUTDOWN -- Triggered ({early_reason})")
+                log_warn(f"Early shutdown requested: {early_reason}. Halting Mothbox gracefully.")
+                run_shutdown_pi5(early_reason=early_reason)
+                break
+
+            # 2. Periodic critical battery monitor (every 30s)
+            now_time = time.time()
+            if (now_time - last_voltage_check) >= 30:
+                last_voltage_check = now_time
+                if mothbox_hw is not None:
+                    try:
+                        p = mothbox_hw.read_power()
+                        v = float(p.get("voltage_v", -1))
+                        if 0.0 < v < 9.8:
+                            reason = f"critical_battery_{v:.2f}V"
+                            log_section(f"EARLY SHUTDOWN -- Critical Battery ({v:.2f}V)")
+                            log_warn(f"Battery voltage {v:.2f}V < 9.8V brownout floor! Halting Mothbox gracefully to prevent PMIC brownout.")
+                            atomic_update_kv(os.path.join(CONTROL_ROOT, "early_shutdown_reason.txt"), "early_shutdown_reason", reason)
+                            run_shutdown_pi5(early_reason=reason)
+                            break
+                    except Exception as e:
+                        log_warn(f"Periodic battery check error: {e}")
 
             schedule.run_pending()
             time.sleep(1)
@@ -1067,10 +1257,13 @@ def final_backup_before_shutdown():
         log_warn(f"Final backup step failed: {e} -- continuing shutdown.")
 
 
-def run_shutdown_pi5():
+def run_shutdown_pi5(early_reason=None):
     """
     Shut down the raspberry pi
     """
+    if not early_reason:
+        early_reason = read_control("early_shutdown_reason", "")
+
     # --- EEPROM safety guard: never power off with a staged flash pending ---
     # If eeprom_safe staged a bootloader update earlier this boot (or a prior
     # boot) and it hasn't been applied/verified yet, a halt here could
@@ -1109,20 +1302,24 @@ def run_shutdown_pi5():
     #-------------------#
 
     # --- Guard: don't shut down if we're still inside a scheduled session window ---
-    cron_source = switch_schedule if use_switch_schedule else load_settings_for_wakeup()
-    current_runtime = int(read_control("runtime", runtime))
-    remaining_minutes = should_abort_shutdown(cron_source, current_runtime)
-    if remaining_minutes is not None:
-        print(f"Shutdown aborted -- rescheduling in {remaining_minutes:.1f} min.")
-        # Clear the old fired job and schedule a new one for the remaining window.
-        # This ensures the device shuts down at the true end of the session rather
-        # than running forever.
-        schedule.clear()
-        schedule.every(remaining_minutes).minutes.do(run_shutdown_pi5)
-        # Release the boot lock so TakePhoto.py can continue capturing
-        if os.path.exists(BOOT_LOCK):
-            os.remove(BOOT_LOCK)
-        return
+    # Bypassed if this is an intentional early shutdown (e.g. storage full or critical battery)
+    if not early_reason:
+        cron_source = switch_schedule if use_switch_schedule else load_settings_for_wakeup()
+        current_runtime = int(read_control("runtime", runtime))
+        remaining_minutes = should_abort_shutdown(cron_source, current_runtime)
+        if remaining_minutes is not None:
+            print(f"Shutdown aborted -- rescheduling in {remaining_minutes:.1f} min.")
+            # Clear the old fired job and schedule a new one for the remaining window.
+            # This ensures the device shuts down at the true end of the session rather
+            # than running forever.
+            schedule.clear()
+            schedule.every(remaining_minutes).minutes.do(run_shutdown_pi5)
+            # Release the boot lock so TakePhoto.py can continue capturing
+            if os.path.exists(BOOT_LOCK):
+                os.remove(BOOT_LOCK)
+            return
+    else:
+        log_info(f"Early shutdown active ({early_reason}) -- session window guard bypassed.")
     # --- End guard ---
 
     arm_shutdown_deadman()
@@ -1142,7 +1339,10 @@ def run_shutdown_pi5():
 
     # Photo capture is locked out (boot lock above) and the wake alarm is safely
     # set -- now flush whatever the throttled cron backup didn't get to.
-    final_backup_before_shutdown()
+    if early_reason and "battery" in str(early_reason).lower():
+        log_warn("[SHUTDOWN] Critical battery condition: skipping final backup to cut load immediately and prevent brownout.")
+    else:
+        final_backup_before_shutdown()
 
     ''' # Cutting out GPS check at shutdown, feels not really needed
     # GPS check / 10 second delay
@@ -1181,15 +1381,24 @@ def run_shutdown_pi5():
 
     time.sleep(3)
 
+    for temp_f in ("early_shutdown_reason.txt", "consecutive_aborted_captures.txt"):
+        fp = os.path.join(CONTROL_ROOT, temp_f)
+        if os.path.exists(fp):
+            try: os.remove(fp)
+            except Exception: pass
+
     os.system("sudo shutdown -h now")
 
 
 
-def run_shutdown_pi5_FAST():
+def run_shutdown_pi5_FAST(early_reason=None):
     """
     Shut down the raspberry pi
     """
     log_section("SHUTDOWN -- Fast")
+
+    if not early_reason:
+        early_reason = read_control("early_shutdown_reason", "")
 
     # --- EEPROM safety guard: never power off with a staged flash pending ---
     if should_reboot_before_poweroff():
@@ -1228,7 +1437,7 @@ def run_shutdown_pi5_FAST():
     # Note: OFF mode bypasses this check intentionally -- if the user flipped the
     # Active switch off, they want the device to shut down regardless of schedule.
     current_mode = read_control("mode", "ACTIVE")
-    if current_mode != "OFF":
+    if current_mode != "OFF" and not early_reason:
         cron_source = switch_schedule if use_switch_schedule else load_settings_for_wakeup()
         current_runtime = int(read_control("runtime", runtime))
         remaining_minutes = should_abort_shutdown(cron_source, current_runtime)
@@ -1240,6 +1449,8 @@ def run_shutdown_pi5_FAST():
             if os.path.exists(BOOT_LOCK):
                 os.remove(BOOT_LOCK)
             return
+    elif early_reason:
+        log_info(f"Early shutdown active ({early_reason}) -- session window guard bypassed.")
     # --- End guard ---
     
     arm_shutdown_deadman()
@@ -1277,7 +1488,11 @@ def run_shutdown_pi5_FAST():
     atomic_update_kv(os.path.join(CONTROL_ROOT, "shutdown_state.txt"), "shutdown_state", "clean")
 
     time.sleep(1)
-    # subprocess.run(["python", "/home/pi/Desktop/Mothbox/TurnEverythingOff.py"])
+    for temp_f in ("early_shutdown_reason.txt", "consecutive_aborted_captures.txt"):
+        fp = os.path.join(CONTROL_ROOT, temp_f)
+        if os.path.exists(fp):
+            try: os.remove(fp)
+            except Exception: pass
     os.system("sudo shutdown -h now")
 
 
@@ -1974,6 +2189,12 @@ except Exception as _e:
         return p
 os.makedirs(CONTROL_ROOT, exist_ok=True)
 
+if "--early-shutdown" in sys.argv:
+    early_reason = read_control("early_shutdown_reason", "cli_request")
+    log_section(f"EARLY SHUTDOWN -- Direct Request ({early_reason})")
+    run_shutdown_pi5(early_reason=early_reason)
+    sys.exit(0)
+
 # --------------------------------------------------------------------
 # Clean Flight & Crash Recovery Guard
 # --------------------------------------------------------------------
@@ -2360,12 +2581,17 @@ if not camera_ok:
         run_cmd("python /home/pi/Desktop/Mothbox/scripts/blink_standby.py 8 0.5")
 #------ End Camera Check -------
 
-
-
-
-
-
-
+# ------ Media Health Check -------
+log_section("LAUNCH -- Media Health Check")
+media_issue = check_media_health()
+if media_issue:
+    log_warn(f"[Scheduler] Media check warning: {media_issue}")
+    if camera_ok and mode != "OFF":
+        # Blink distinct 5-blink warning so operator on deployment knows media needs attention
+        run_cmd("python /home/pi/Desktop/Mothbox/scripts/blink_standby.py 5 0.2")
+else:
+    log_ok("[Scheduler] Media health check OK: USB and SD verified.")
+# ------ End Media Health Check ---
 
 log_section("LAUNCH -- Schedule Check")
 

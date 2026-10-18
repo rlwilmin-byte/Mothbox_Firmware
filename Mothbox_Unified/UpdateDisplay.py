@@ -582,23 +582,42 @@ try:
     draw.text((epd.height - 2 - version_w, 8.7*rowH), version_txt, font=font_bigs, fill=0)
 
 
-    # ---- Error banner, drawn LAST so it sits on top of everything ----
+    # ---- Error/Warning banner, drawn LAST so it sits on top of everything ----
     # A blink pattern only helps someone standing there at the right moment;
     # e-ink holds the message until it is fixed. Inverted (white on black) so
     # it cannot be mistaken for normal content.
     camera_state = read_control(CONTROL_ROOT / "camera.txt", "camera", "ok")
-    if str(camera_state).strip().lower() == "missing":
-        msg = "ERROR: CAMERA DISCONNECTED"
+    media_warning = read_control(CONTROL_ROOT / "media_warning.txt", "media_warning", "")
+    cam_missing = (str(camera_state).strip().lower() == "missing")
+    has_media_warn = bool(str(media_warning).strip())
+
+    if cam_missing or has_media_warn:
+        if cam_missing and has_media_warn:
+            msg = f"ERR: CAM MISSING | {str(media_warning).strip().upper()}"
+        elif cam_missing:
+            msg = "ERROR: CAMERA DISCONNECTED"
+        else:
+            msg = f"WARNING: {str(media_warning).strip().upper()}"
+
         font_err = load_font('/home/pi/Desktop/Mothbox/graphics/fonts/Atkinson_Next/AtkinsonHyperlegibleNext-Bold.otf', 13)
         try:
             tw = font_err.getlength(msg)
         except AttributeError:
             tw = draw.textsize(msg, font=font_err)[0]
-        bh = 19
+
+        # If message is wide, use a slightly smaller font so it fits comfortably
+        if tw > (epd.height - 12):
+            font_err = load_font('/home/pi/Desktop/Mothbox/graphics/fonts/Atkinson_Next/AtkinsonHyperlegibleNext-Bold.otf', 11)
+            try:
+                tw = font_err.getlength(msg)
+            except AttributeError:
+                tw = draw.textsize(msg, font=font_err)[0]
+
+        bh = 20
         by = int(3.2 * rowH)
         draw.rectangle([(0, by), (epd.height, by + bh)], fill=0)          # solid black bar, full width
         draw.text(((epd.height - tw) / 2, by + 3), msg, font=font_err, fill=255)
-        print("[UpdateDisplay] camera.txt says missing -- drew the error banner")
+        print(f"[UpdateDisplay] Drew warning banner: '{msg}'")
 
     #image = image.rotate(180) # rotate
     # Send to display
