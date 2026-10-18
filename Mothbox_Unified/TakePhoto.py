@@ -213,6 +213,7 @@ DEFAULT_CAMERA_SETTINGS_PATH = "/boot/firmware/mothbox_custom/system/controls/de
 AF_LENS_PATH = CONTROL_ROOT / "aflensposition.txt"
 AF_GAIN_PATH=CONTROL_ROOT / "autogain.txt"
 AF_EXPOSURE_PATH =CONTROL_ROOT / "exposuretime.txt"
+CAPTURE_TIMEOUT_S = 20   # a healthy capture takes ~1 s; see flash watchdog notes below
 
 
 
