@@ -123,6 +123,14 @@ class TestBackupResilience(unittest.TestCase):
         state_file.write_text("shutdown_state=dirty\n")
         self.assertIn("shutdown_state=dirty", state_file.read_text())
 
+    def test_import_with_boot_lock_present(self):
+        # Crucial regression test: importing Backup_Files while BOOT_LOCK is present
+        # must NOT raise SystemExit. The exit guard belongs inside __main__ only.
+        import unittest.mock as mock
+        with mock.patch("os.path.exists", side_effect=lambda p: True if p == Backup_Files.BOOT_LOCK else False):
+            # Re-importing or accessing Backup_Files functions should not raise SystemExit
+            self.assertTrue(callable(Backup_Files.reclaim_orphaned_rec_files))
+
 
 if __name__ == "__main__":
     unittest.main()

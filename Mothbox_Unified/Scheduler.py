@@ -987,7 +987,7 @@ def check_media_health(mounts_file="/proc/mounts"):
         try:
             from Backup_Files import reclaim_orphaned_rec_files
             reclaim_orphaned_rec_files(Path(largest_usb_path))
-        except Exception as re_err:
+        except (Exception, BaseException) as re_err:
             log_warn(f"Could not reclaim .REC files: {re_err}")
 
     # Prioritize primary warning message
@@ -2590,7 +2590,7 @@ if not camera_ok:
         log_info("Mode is OFF -- skipping the 8-blink warning (nothing may light up in OFF).")
     else:
         log_warn("Blinking the 8x camera warning.")
-        run_cmd("python /home/pi/Desktop/Mothbox/scripts/blink_standby.py 8 0.5")
+        run_cmd("python3 /home/pi/Desktop/Mothbox/scripts/blink_standby.py 8 0.5")
 #------ End Camera Check -------
 
 # ------ Media Health Check -------
@@ -2600,7 +2600,7 @@ if media_issue:
     log_warn(f"[Scheduler] Media check warning: {media_issue}")
     if camera_ok and mode != "OFF":
         # Blink distinct 5-blink warning so operator on deployment knows media needs attention
-        run_cmd("python /home/pi/Desktop/Mothbox/scripts/blink_standby.py 5 0.2")
+        run_cmd("python3 /home/pi/Desktop/Mothbox/scripts/blink_standby.py 5 0.2")
 else:
     log_ok("[Scheduler] Media health check OK: USB and SD verified.")
 # ------ End Media Health Check ---
@@ -2624,7 +2624,7 @@ if mode == "ACTIVE":
         # Only the "all good" blink here -- a missing camera already blinked its
         # 8x warning right after the check, on whichever path we took.
         if camera_ok:
-            run_cmd("python /home/pi/Desktop/Mothbox/scripts/blink_standby.py 2 0.125")
+            run_cmd("python3 /home/pi/Desktop/Mothbox/scripts/blink_standby.py 2 0.125")
 
         log_section("STANDBY -- Sensors & Diagnostics")
         run_script("/home/pi/Desktop/Mothbox/Diagnostics.py", "Standby_Check", show_output=True)

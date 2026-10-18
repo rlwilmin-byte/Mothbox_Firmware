@@ -36,10 +36,7 @@ BOOT_LOCK = "/run/boot_script_running"
 # from cron -- it is only meaningful when the Scheduler is orchestrating the
 # shutdown sequence.
 FINAL_BACKUP = "--final" in sys.argv[1:]
-
-if os.path.exists(BOOT_LOCK) and not FINAL_BACKUP:
-    sys.exit(0)
-
+# (BOOT_LOCK exit guard moved inside __main__ so importing this module does not terminate caller)
 #-----------------------------##
 
 import os
@@ -769,6 +766,10 @@ def backup_and_delete(source_folder, destination_folder):
 
 
 if __name__ == "__main__":
+    FINAL_BACKUP = "--final" in sys.argv[1:]
+    if os.path.exists(BOOT_LOCK) and not FINAL_BACKUP:
+        sys.exit(0)
+
     if FINAL_BACKUP:
         print("Final end-of-session backup requested -- skipping interval throttle.")
     elif not is_backup_due():
