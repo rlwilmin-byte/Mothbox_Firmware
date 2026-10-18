@@ -167,17 +167,7 @@ def get_burst_interval_s():
 
 
 
-#IF the mothbox is supposed to be off, don't take a photo!
-mode = read_control(CONTROL_ROOT / "mode.txt", "mode", "ACTIVE")
-
-if mode in ("OFF", "STANDBY"):
-    print("Mothbox is in", mode, "mode, not taking photos")
-    quit()
-
-# Check and see if we should be taking a photo right now
-if not is_photo_due():
-    print(f"Photo not due yet (interval={get_photo_interval()} min). Skipping.")
-    sys.exit(0)
+# (Mode and interval checks moved into __main__ block so importing TakePhoto as a library does not exit)
 
 
 
@@ -1215,300 +1205,310 @@ def get_storage_info(path):
 
 #---------------MAIN CODE--------------------- #
 
-print("----------------- STARTING TAKEPHOTO-------------------")
-now = datetime.now()
-formatted_time = now.strftime("%Y-%m-%d %H:%M:%S")  # Adjust the format as needed
+if __name__ == "__main__":
+    mode = read_control(CONTROL_ROOT / "mode.txt", "mode", "ACTIVE")
+    if mode in ("OFF", "STANDBY"):
+        print("Mothbox is in", mode, "mode, not taking photos")
+        sys.exit(0)
 
-print(f"Current time: {formatted_time}")
+    if not is_photo_due():
+        print(f"Photo not due yet (interval={get_photo_interval()} min). Skipping.")
+        sys.exit(0)
 
-
-# 1. Critical battery voltage pre-check (<9.8V PMIC brownout safety floor)
-# Prevents taking captures or firing flashes when battery voltage is critically depleted.
-try:
-    if mothbox_hw is not None:
-        pwr = mothbox_hw.read_power()
-        v = float(pwr.get("voltage_v", -1))
-        if 0.0 < v < 9.8:
-            print(f"[CRITICAL] Battery voltage {v:.2f}V is below 9.8V brownout floor! Aborting capture to prevent brownout.")
-            trigger_early_shutdown(reason=f"critical_battery_{v:.2f}V")
-            quit()
-except Exception as e:
-    print(f"[TakePhoto] Battery pre-check exception: {e}")
-
-# 2. Storage availability check and 10-consecutive-abort guard
-# First check and see if we have enough storage left to keep taking photos, or else do nothing
-# Get total and available space on desktop and external storage
-desktop_total, desktop_available = get_storage_info(desktop_path)
-print("Desktop Total    Storage: \t" + str(desktop_total))
-print("Desktop Available Storage: \t" + str(desktop_available))
-x = extra_photo_storage_minimum
-print("Minimum storage needed: \t" + str(x * 1024**3))
-
-if desktop_available < x * 1024**3:  # x GB in bytes
-    current_mode = read_control(CONTROL_ROOT / "mode.txt", "mode", "ACTIVE")
-    if current_mode in ("DEBUG", "PARTY"):
-        print(f"[TakePhoto] Low storage in {current_mode} mode ({desktop_available / (1024**3):.2f} GB available < {x} GB minimum). Skipping capture, early shutdown suppressed.")
-        quit()
-    aborted_count = int(read_control(ABORT_COUNTER_FILE, "consecutive_aborted_captures", 0)) + 1
-    atomic_update_kv(ABORT_COUNTER_FILE, "consecutive_aborted_captures", str(aborted_count))
-    print(f"[STORAGE ALERT] Not enough space to take more photos ({desktop_available / (1024**3):.2f} GB available < {x} GB minimum). Consecutive aborted captures: {aborted_count}/10")
-    if aborted_count >= 10:
-        print(f"[CRITICAL] Storage full: 10 consecutive capture attempts aborted. Initiating graceful early shutdown.")
-        trigger_early_shutdown(reason="storage_full_10_aborts")
-    quit()
-
-
-
-
-#First figure out if this is a Pi4 or a Pi5
-rpiModel=None
-rpiModel=determinePiModel()
-
-#default resolution
-width=9000
-height=6000
-
-#the Pi4 can't really handle the FULL resolution, but pi5 can!
-if(rpiModel==5):
-    width=9248
-    height=6944
-
-
-#I don't really know why we need this below code, but it's here. it may have been an earlier attempt to find the pi model
-if platform.system() == "Windows":
-	print(platform.uname().node)
-else:
-	#computerName = os.uname()[1]
-	print(os.uname()[1])   # doesnt work on windows
-
-
-#HDR Controls
-CAPTURE_TIMEOUT_S = 20   # a healthy capture takes ~1 s; see flash watchdog notes above
-num_photos = 1
-exposuretime_width = 18000
-middleexposure=500 # requested exposure (us). Below the OwlSight's floor, so it is clamped to the minimum the sensor mode allows
-
-
-#global onlyflash
-#onlyflash=False
-
-
-
-#control_values_fpath = "/boot/firmware/mothbox_custom/system/controls.txt"
-#control_values = get_control_values(control_values_fpath)
-
-#onlyflash = control_values.get("OnlyFlash", "True").lower() == "true"
-#onlyflash = read_control(CONTROL_ROOT / "onlyflash.txt", "onlyflash", "0")
-
-#LastCalibration = float(control_values.get("LastCalibration", 0))
-LastCalibration= float(read_control(CONTROL_ROOT / "lastcalibration.txt", "lastcalibration", 0))
-
-
-#computerName = control_values.get("name", "wrong")
-computerName = read_control(CONTROL_ROOT / "name.txt", "name", "errorname")
-softwareversion = read_control(CONTROL_ROOT / "softwareversion.txt", "softwareversion", "5")
-# GPS fix written by GPS.py at boot; "n/a" (or missing) simply means no GPS tags.
-gps_lat = read_control(CONTROL_ROOT / "lat.txt", "lat", None)
-gps_lon = read_control(CONTROL_ROOT / "lon.txt", "lon", None)
-
-# Read UTC offset (stored as a float like 2.0 or -5.5 cuz fun timezones like kathmandu)
-utc_offset_hours = float(read_control(CONTROL_ROOT / "utc.txt", "utc", 0))
-
-'''
-if(onlyflash):
-    print("operating in always on flash mode")
-'''
-
-
-#------- Setting up camera settings -------------
-
-'''
-#This is for getting min and max details for certain settings, (See the picam pdf manual)
-print(picam2.camera_controls["AnalogueGain"])
-min_gain, max_gain, default_gain = picam2.camera_controls["AnalogueGain"]
-'''
-#This will be the path to the CSV holding the settings whether it is the one on the disk or the external CSV
-global chosen_settings_path
-default_path = "/boot/firmware/mothbox_custom/camera_settings.csv"
-chosen_settings_path=default_path
-
-#camera_settings = load_camera_settings("camera_settings.csv")#CRONTAB CAN'T TAKE RELATIVE LINKS! 
-camera_settings = load_camera_settings()
-
+    print("----------------- STARTING TAKEPHOTO-------------------")
+    now = datetime.now()
+    formatted_time = now.strftime("%Y-%m-%d %H:%M:%S")  # Adjust the format as needed
     
-#before calibration, set these values to the default we read in
-
-
-calib_lens_position = float(read_control(AF_LENS_PATH, "aflensposition", 6.0))
-human_lens_position = camera_settings.get("LensPosition", None)
-
-calib_exposure      = float(read_control(AF_EXPOSURE_PATH, "exposuretime", 500))
-human_exposure = camera_settings["ExposureTime"]
-
-calib_gain          = float(read_control(AF_GAIN_PATH, "autogain", 1.0))
-
-AutoCalibration = camera_settings.pop("AutoCalibration",1) #defaults to what is set above if not in the files being read
-AutoCalibrationPeriod = int(camera_settings.pop("AutoCalibrationPeriod",1000))
-extract_af_limits(camera_settings)
-
-
-#Start up cameras
-# No camera (cable loose, ribbon backwards, dead module) is the one fault a
-# box in the field cannot show any other way while ACTIVE, so mirror the
-# Scheduler's standby warning: blink the lights 8 times, then give up on this
-# photo. Cron will try again next minute and warn again.
-def warn_no_camera(reason):
-    """
-    Give up on THIS photo, quietly.
-
-    Deliberately does NOT blink the 8x warning or touch camera.txt. The box
-    cannot have been unplugged mid-session, so a camera error here is almost
-    always transient -- usually a previous TakePhoto still holding the camera
-    ("Camera __init__ sequence did not complete"). On 2026-10-05 that fired 12
-    times in one session on a healthy box: 12 spurious 8-blink alarms, ~96 s of
-    extra full-brightness lights, and a false "CAMERA DISCONNECTED" banner.
-    Detecting a genuinely absent camera is the Scheduler's job, once, at boot.
-    """
-    print(f"[TakePhoto] camera unavailable ({reason}) -- skipping this photo, will retry next cycle")
-    if mothbox_hw is not None:
-        try:
-            mothbox_hw.flash_off()      # the flash must never be left on
-        except Exception:
-            pass
-    else:
-        run_cmd("python /home/pi/Desktop/Mothbox/Flash_Off.py")
-    _disarm_flash_watchdog()
-    sys.exit(0)
-
-# Whole-photo watchdog inside this process: if anything in the camera path
-# blocks (a camera that starts but never delivers a frame), give up, kill the
-# flash, warn. SIGALRM is delivered while picamera2 waits on Python-level
-# events, which is where these hangs happen.
-import signal
-PHOTO_WATCHDOG_S = max(150, int(get_burst_count() * get_burst_interval_s() + 60))
-
-def _photo_watchdog(signum, frame):
-    warn_no_camera(f"photo did not complete within {PHOTO_WATCHDOG_S}s")
-
-signal.signal(signal.SIGALRM, _photo_watchdog)
-signal.alarm(PHOTO_WATCHDOG_S)
-
-# Picamera2() alone is enough. global_camera_info() used to run first, which
-# builds and tears down a whole CameraManager -- a second full libcamera
-# enumeration on every photo, for no benefit, since Picamera2() reports the
-# same failure.
-try:
-    picam2 = Picamera2()
-except SystemExit:
-    raise
-except Exception as e:
-    warn_no_camera(f"{e.__class__.__name__}: {e}")
-
-def start_camera_or_warn(**kwargs):
-    """
-    picam2.start() that treats failure as "no camera". A ribbon that is
-    unplugged after boot does NOT vanish from libcamera's list (the ov64a40
-    overlay registered the sensor at boot, so Picamera2() still succeeds);
-    the first real I2C / streaming access is what fails, with
-    'Failed to start camera: Remote I/O error'. Every camera start in this
-    file goes through here so that case blinks the warning too.
-    """
+    print(f"Current time: {formatted_time}")
+    
+    
+    # 1. Critical battery voltage pre-check (<9.8V PMIC brownout safety floor)
+    # Prevents taking captures or firing flashes when battery voltage is critically depleted.
     try:
-        picam2.start(**kwargs)
+        if mothbox_hw is not None:
+            pwr = mothbox_hw.read_power()
+            v = float(pwr.get("voltage_v", -1))
+            if 0.0 < v < 9.8:
+                print(f"[CRITICAL] Battery voltage {v:.2f}V is below 9.8V brownout floor! Aborting capture to prevent brownout.")
+                trigger_early_shutdown(reason=f"critical_battery_{v:.2f}V")
+                quit()
     except Exception as e:
-        warn_no_camera(f"camera failed to start: {e}")
-
-
-#----Autocalibration ---------
-
-current_time = int(time.time())
-timesincelastcalibration= current_time - LastCalibration
-print("Last calibration was   ",timesincelastcalibration,"  seconds ago \n Autocalibration period is   ", AutoCalibrationPeriod)
-recalibrated= False
-if AutoCalibration and (timesincelastcalibration > AutoCalibrationPeriod):
-    print("Do Autocalibrate")
-    recalibrated=True
-    print(current_time)
-    #picam2.configure(preview_config)
-    #picam2.configure(capture_config_fastAuto)
-    run_calibration()
-else:
-    print("Don't Autocalibration")
-
-# ------ Prepare to take actual photo -----------
-#reload camera settings after possible calibration
-camera_settings = load_camera_settings()
-AutoCalibration = camera_settings.pop("AutoCalibration",1) #defaults to what is set above if not in the files being read
-AutoCalibrationPeriod = int(camera_settings.pop("AutoCalibrationPeriod",1000))
-extract_af_limits(camera_settings)
-
-if AutoCalibration:
-    None
-else:
-    calib_lens_position = human_lens_position
-    calib_exposure = human_exposure
-
-
-#remove settings that aren't actually in picamera2
-oldsettingsnames = camera_settings.pop("Name",computerName) #defaults to what is set above if not in the files being read
-ImageFileType = int(camera_settings.pop("ImageFileType",0))
-_vf = camera_settings.pop("VerticalFlip", "auto")
-if str(_vf).strip().lower() in ("auto", ""):
-    # Camera is mounted upside-down in the DIY enclosure, upright in the Pro.
-    VerticalFlip = mothbox_hw.vertical_flip_default() if mothbox_hw else 0
-else:
-    VerticalFlip = int(float(_vf))
-print(f"VerticalFlip: {VerticalFlip} (setting was {_vf!r})")
-onlyflash =int(camera_settings.pop("onlyflash",0))
-
-#HDR settings
-num_photos = int(camera_settings.pop("HDR",num_photos)) #defaults to what is set above if not in the files being read
-
-exposuretime_width = int(camera_settings.pop("HDR_width",exposuretime_width))
-if(num_photos<1 or num_photos==2):
-    num_photos=1
-
-capture_main = {"size": (width, height), "format": "RGB888", }
-capture_config = picam2.create_still_configuration(main=capture_main,raw=None, lores=None)
-capture_config_flipped =  picam2.create_still_configuration(main=capture_main, transform=Transform(vflip=True, hflip=True), raw=None, lores=None)
-picam2.configure(capture_config)
-
-
-if camera_settings:
-    print(camera_settings)
-    print(calib_lens_position, calib_exposure, calib_gain)
-    camera_settings["LensPosition"] = float(calib_lens_position)
-    camera_settings["ExposureTime"] = int(calib_exposure)
-    camera_settings["AnalogueGain"] = float(calib_gain)
-    picam2.set_controls(camera_settings)
-
-start_camera_or_warn()
-time.sleep(1)
-
-print("cam started");
-
-picam2.stop()
-
-if(VerticalFlip):
-    picam2.configure(capture_config_flipped)
-else:
+        print(f"[TakePhoto] Battery pre-check exception: {e}")
+    
+    # 2. Storage availability check and 10-consecutive-abort guard
+    # First check and see if we have enough storage left to keep taking photos, or else do nothing
+    # Get total and available space on desktop and external storage
+    desktop_total, desktop_available = get_storage_info(desktop_path)
+    print("Desktop Total    Storage: \t" + str(desktop_total))
+    print("Desktop Available Storage: \t" + str(desktop_available))
+    x = extra_photo_storage_minimum
+    print("Minimum storage needed: \t" + str(x * 1024**3))
+    
+    if desktop_available < x * 1024**3:  # x GB in bytes
+        current_mode = read_control(CONTROL_ROOT / "mode.txt", "mode", "ACTIVE")
+        if current_mode in ("DEBUG", "PARTY"):
+            print(f"[TakePhoto] Low storage in {current_mode} mode ({desktop_available / (1024**3):.2f} GB available < {x} GB minimum). Skipping capture, early shutdown suppressed.")
+            quit()
+        aborted_count = int(read_control(ABORT_COUNTER_FILE, "consecutive_aborted_captures", 0)) + 1
+        atomic_update_kv(ABORT_COUNTER_FILE, "consecutive_aborted_captures", str(aborted_count))
+        print(f"[STORAGE ALERT] Not enough space to take more photos ({desktop_available / (1024**3):.2f} GB available < {x} GB minimum). Consecutive aborted captures: {aborted_count}/10")
+        if aborted_count >= 10:
+            print(f"[CRITICAL] Storage full: 10 consecutive capture attempts aborted. Initiating graceful early shutdown.")
+            trigger_early_shutdown(reason="storage_full_10_aborts")
+        quit()
+    
+    
+    
+    
+    #First figure out if this is a Pi4 or a Pi5
+    rpiModel=None
+    rpiModel=determinePiModel()
+    
+    #default resolution
+    width=9000
+    height=6000
+    
+    #the Pi4 can't really handle the FULL resolution, but pi5 can!
+    if(rpiModel==5):
+        width=9248
+        height=6944
+    
+    
+    #I don't really know why we need this below code, but it's here. it may have been an earlier attempt to find the pi model
+    if platform.system() == "Windows":
+    	print(platform.uname().node)
+    else:
+    	#computerName = os.uname()[1]
+    	print(os.uname()[1])   # doesnt work on windows
+    
+    
+    #HDR Controls
+    CAPTURE_TIMEOUT_S = 20   # a healthy capture takes ~1 s; see flash watchdog notes above
+    num_photos = 1
+    exposuretime_width = 18000
+    middleexposure=500 # requested exposure (us). Below the OwlSight's floor, so it is clamped to the minimum the sensor mode allows
+    
+    
+    #global onlyflash
+    #onlyflash=False
+    
+    
+    
+    #control_values_fpath = "/boot/firmware/mothbox_custom/system/controls.txt"
+    #control_values = get_control_values(control_values_fpath)
+    
+    #onlyflash = control_values.get("OnlyFlash", "True").lower() == "true"
+    #onlyflash = read_control(CONTROL_ROOT / "onlyflash.txt", "onlyflash", "0")
+    
+    #LastCalibration = float(control_values.get("LastCalibration", 0))
+    LastCalibration= float(read_control(CONTROL_ROOT / "lastcalibration.txt", "lastcalibration", 0))
+    
+    
+    #computerName = control_values.get("name", "wrong")
+    computerName = read_control(CONTROL_ROOT / "name.txt", "name", "errorname")
+    softwareversion = read_control(CONTROL_ROOT / "softwareversion.txt", "softwareversion", "5")
+    # GPS fix written by GPS.py at boot; "n/a" (or missing) simply means no GPS tags.
+    gps_lat = read_control(CONTROL_ROOT / "lat.txt", "lat", None)
+    gps_lon = read_control(CONTROL_ROOT / "lon.txt", "lon", None)
+    
+    # Read UTC offset (stored as a float like 2.0 or -5.5 cuz fun timezones like kathmandu)
+    utc_offset_hours = float(read_control(CONTROL_ROOT / "utc.txt", "utc", 0))
+    
+    '''
+    if(onlyflash):
+        print("operating in always on flash mode")
+    '''
+    
+    
+    #------- Setting up camera settings -------------
+    
+    '''
+    #This is for getting min and max details for certain settings, (See the picam pdf manual)
+    print(picam2.camera_controls["AnalogueGain"])
+    min_gain, max_gain, default_gain = picam2.camera_controls["AnalogueGain"]
+    '''
+    #This will be the path to the CSV holding the settings whether it is the one on the disk or the external CSV
+    global chosen_settings_path
+    default_path = "/boot/firmware/mothbox_custom/camera_settings.csv"
+    chosen_settings_path=default_path
+    
+    #camera_settings = load_camera_settings("camera_settings.csv")#CRONTAB CAN'T TAKE RELATIVE LINKS! 
+    camera_settings = load_camera_settings()
+    
+        
+    #before calibration, set these values to the default we read in
+    
+    
+    calib_lens_position = float(read_control(AF_LENS_PATH, "aflensposition", 6.0))
+    human_lens_position = camera_settings.get("LensPosition", None)
+    
+    calib_exposure      = float(read_control(AF_EXPOSURE_PATH, "exposuretime", 500))
+    human_exposure = camera_settings["ExposureTime"]
+    
+    calib_gain          = float(read_control(AF_GAIN_PATH, "autogain", 1.0))
+    
+    AutoCalibration = camera_settings.pop("AutoCalibration",1) #defaults to what is set above if not in the files being read
+    AutoCalibrationPeriod = int(camera_settings.pop("AutoCalibrationPeriod",1000))
+    extract_af_limits(camera_settings)
+    
+    
+    #Start up cameras
+    # No camera (cable loose, ribbon backwards, dead module) is the one fault a
+    # box in the field cannot show any other way while ACTIVE, so mirror the
+    # Scheduler's standby warning: blink the lights 8 times, then give up on this
+    # photo. Cron will try again next minute and warn again.
+    def warn_no_camera(reason):
+        """
+        Give up on THIS photo, quietly.
+    
+        Deliberately does NOT blink the 8x warning or touch camera.txt. The box
+        cannot have been unplugged mid-session, so a camera error here is almost
+        always transient -- usually a previous TakePhoto still holding the camera
+        ("Camera __init__ sequence did not complete"). On 2026-10-05 that fired 12
+        times in one session on a healthy box: 12 spurious 8-blink alarms, ~96 s of
+        extra full-brightness lights, and a false "CAMERA DISCONNECTED" banner.
+        Detecting a genuinely absent camera is the Scheduler's job, once, at boot.
+        """
+        print(f"[TakePhoto] camera unavailable ({reason}) -- skipping this photo, will retry next cycle")
+        if mothbox_hw is not None:
+            try:
+                mothbox_hw.flash_off()      # the flash must never be left on
+            except Exception:
+                pass
+        else:
+            run_cmd("python /home/pi/Desktop/Mothbox/Flash_Off.py")
+        _disarm_flash_watchdog()
+        sys.exit(0)
+    
+    # Whole-photo watchdog inside this process: if anything in the camera path
+    # blocks (a camera that starts but never delivers a frame), give up, kill the
+    # flash, warn. SIGALRM is delivered while picamera2 waits on Python-level
+    # events, which is where these hangs happen.
+    import signal
+    PHOTO_WATCHDOG_S = max(150, int(get_burst_count() * get_burst_interval_s() + 60))
+    
+    def _photo_watchdog(signum, frame):
+        warn_no_camera(f"photo did not complete within {PHOTO_WATCHDOG_S}s")
+    
+    signal.signal(signal.SIGALRM, _photo_watchdog)
+    signal.alarm(PHOTO_WATCHDOG_S)
+    
+    # Picamera2() alone is enough. global_camera_info() used to run first, which
+    # builds and tears down a whole CameraManager -- a second full libcamera
+    # enumeration on every photo, for no benefit, since Picamera2() reports the
+    # same failure.
+    try:
+        picam2 = Picamera2()
+    except SystemExit:
+        raise
+    except Exception as e:
+        warn_no_camera(f"{e.__class__.__name__}: {e}")
+    
+    def start_camera_or_warn(**kwargs):
+        """
+        picam2.start() that treats failure as "no camera". A ribbon that is
+        unplugged after boot does NOT vanish from libcamera's list (the ov64a40
+        overlay registered the sensor at boot, so Picamera2() still succeeds);
+        the first real I2C / streaming access is what fails, with
+        'Failed to start camera: Remote I/O error'. Every camera start in this
+        file goes through here so that case blinks the warning too.
+        """
+        try:
+            picam2.start(**kwargs)
+        except Exception as e:
+            warn_no_camera(f"camera failed to start: {e}")
+    
+    
+    #----Autocalibration ---------
+    
+    current_time = int(time.time())
+    timesincelastcalibration= current_time - LastCalibration
+    print("Last calibration was   ",timesincelastcalibration,"  seconds ago \n Autocalibration period is   ", AutoCalibrationPeriod)
+    recalibrated= False
+    if AutoCalibration and (timesincelastcalibration > AutoCalibrationPeriod):
+        print("Do Autocalibrate")
+        recalibrated=True
+        print(current_time)
+        #picam2.configure(preview_config)
+        #picam2.configure(capture_config_fastAuto)
+        run_calibration()
+    else:
+        print("Don't Autocalibration")
+    
+    # ------ Prepare to take actual photo -----------
+    #reload camera settings after possible calibration
+    camera_settings = load_camera_settings()
+    AutoCalibration = camera_settings.pop("AutoCalibration",1) #defaults to what is set above if not in the files being read
+    AutoCalibrationPeriod = int(camera_settings.pop("AutoCalibrationPeriod",1000))
+    extract_af_limits(camera_settings)
+    
+    if AutoCalibration:
+        None
+    else:
+        calib_lens_position = human_lens_position
+        calib_exposure = human_exposure
+    
+    
+    #remove settings that aren't actually in picamera2
+    oldsettingsnames = camera_settings.pop("Name",computerName) #defaults to what is set above if not in the files being read
+    ImageFileType = int(camera_settings.pop("ImageFileType",0))
+    _vf = camera_settings.pop("VerticalFlip", "auto")
+    if str(_vf).strip().lower() in ("auto", ""):
+        # Camera is mounted upside-down in the DIY enclosure, upright in the Pro.
+        VerticalFlip = mothbox_hw.vertical_flip_default() if mothbox_hw else 0
+    else:
+        VerticalFlip = int(float(_vf))
+    print(f"VerticalFlip: {VerticalFlip} (setting was {_vf!r})")
+    onlyflash =int(camera_settings.pop("onlyflash",0))
+    
+    #HDR settings
+    num_photos = int(camera_settings.pop("HDR",num_photos)) #defaults to what is set above if not in the files being read
+    
+    exposuretime_width = int(camera_settings.pop("HDR_width",exposuretime_width))
+    if(num_photos<1 or num_photos==2):
+        num_photos=1
+    
+    capture_main = {"size": (width, height), "format": "RGB888", }
+    capture_config = picam2.create_still_configuration(main=capture_main,raw=None, lores=None)
+    capture_config_flipped =  picam2.create_still_configuration(main=capture_main, transform=Transform(vflip=True, hflip=True), raw=None, lores=None)
     picam2.configure(capture_config)
-
-capture_mode = get_capture_mode()
-burst_count = get_burst_count()
-burst_interval_s = get_burst_interval_s()
-print(f"Capture mode: {capture_mode}")
-
-if capture_mode == "burst":
-    takePhoto_Burst(burst_count=burst_count, interval_s=burst_interval_s)
-else:
-    time.sleep(.5)
-    takePhoto_Manual()
-
-
-picam2.stop()
-signal.alarm(0)
-_disarm_flash_watchdog()
-record_photo_taken()  # Only called on successful capture completion
-quit()
-
+    
+    
+    if camera_settings:
+        print(camera_settings)
+        print(calib_lens_position, calib_exposure, calib_gain)
+        camera_settings["LensPosition"] = float(calib_lens_position)
+        camera_settings["ExposureTime"] = int(calib_exposure)
+        camera_settings["AnalogueGain"] = float(calib_gain)
+        picam2.set_controls(camera_settings)
+    
+    start_camera_or_warn()
+    time.sleep(1)
+    
+    print("cam started");
+    
+    picam2.stop()
+    
+    if(VerticalFlip):
+        picam2.configure(capture_config_flipped)
+    else:
+        picam2.configure(capture_config)
+    
+    capture_mode = get_capture_mode()
+    burst_count = get_burst_count()
+    burst_interval_s = get_burst_interval_s()
+    print(f"Capture mode: {capture_mode}")
+    
+    if capture_mode == "burst":
+        takePhoto_Burst(burst_count=burst_count, interval_s=burst_interval_s)
+    else:
+        time.sleep(.5)
+        takePhoto_Manual()
+    
+    
+    picam2.stop()
+    signal.alarm(0)
+    _disarm_flash_watchdog()
+    record_photo_taken()  # Only called on successful capture completion
+    quit()
+    
