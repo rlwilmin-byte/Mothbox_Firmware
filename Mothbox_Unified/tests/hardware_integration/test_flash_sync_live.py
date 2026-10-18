@@ -152,7 +152,7 @@ def run_live_test(iterations=3, sample_path="/tmp/test_flash_sync.jpg"):
             try:
                 # 1. Flush in-flight frame buffer from libcamera
                 t_flush_start_ns = time.monotonic_ns()
-                discard_req = picam2.capture_request(flush=True, wait=2.0)
+                discard_req = picam2.capture_request(flush=True, wait=10.0)
                 t_flush_end_ns = time.monotonic_ns()
                 if discard_req:
                     discard_req.release()
