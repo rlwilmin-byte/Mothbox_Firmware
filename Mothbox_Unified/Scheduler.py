@@ -1527,7 +1527,7 @@ def enable_onlyflash():
 def stopcron():
     """Executes the '/home/pi/Desktop/Mothbox/StopCron.py' script."""
     print("stopping cron, you need to enable it yourself if needed, or reboot")
-    subprocess.run(["python", "/home/pi/Desktop/Mothbox/StopCron.py"])
+    subprocess.run(["python3", "/home/pi/Desktop/Mothbox/StopCron.py"])
 
 
 def is_wifi_already_known(ssid):
@@ -2679,7 +2679,7 @@ if mode == "DEBUG":
     # Define the path to your script (replace 'path/to/script' with the actual path)
     debug_script_path = "/home/pi/Desktop/Mothbox/DebugMode.py"
     run_mode_script(debug_script_path)
-    # stopcron()
+    stopcron()
 elif mode == "PARTY":
     log_ok("Mode is PARTY -- lights cycling, wifi on.")
     # Define the path to your script (replace 'path/to/script' with the actual path)
@@ -2688,7 +2688,7 @@ elif mode == "PARTY":
 
     party_script_path = "/home/pi/Desktop/Mothbox/Party.py"
     run_mode_script(party_script_path)
-    # stopcron()
+    stopcron()
 elif mode == "ACTIVE":
     log_ok("Mode is ACTIVE -- session running.")
     # Ensure attractor lights are switched on immediately for the session
