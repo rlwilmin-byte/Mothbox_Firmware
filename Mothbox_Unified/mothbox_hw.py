@@ -454,8 +454,27 @@ def vertical_flip_default():
 
 # ------------------------------------------------------------------ rails --
 def rail_12v(on):
-    """Pro lights rail. No-op on DIY (relays switch the lights directly)."""
+    """
+    Pro lights rail with soft-start inrush ramp.
+    Ramping Q8 duty cycle prevents capacitive inrush spikes from collapsing
+    the battery/regulator and brownout-resetting the Pi 5 PMIC.
+    No-op on DIY (relays switch the lights directly).
+    """
     if is_pro():
+        if on:
+            try:
+                import lgpio
+                h = lgpio.gpiochip_open(4)
+                lgpio.gpio_claim_output(h, PRO["RAIL_12V"], 0)
+                for dc in (1, 5, 15, 30, 60):
+                    lgpio.tx_pwm(h, PRO["RAIL_12V"], 1000, dc)
+                    time.sleep(0.015)
+                lgpio.gpio_write(h, PRO["RAIL_12V"], 1)
+                lgpio.gpiochip_close(h)
+                _out(PRO["RAIL_12V"], True)
+                return
+            except Exception:
+                pass
         _out(PRO["RAIL_12V"], bool(on))
 
 
