@@ -183,33 +183,31 @@ def should_update_display(event, settings_dict, current_mode, next_epoch=None, n
         return True
 
     # ep_mode == 'sparse'
-    dt = now_dt or datetime.now()
+    # 3. Boot / Wake ALWAYS ranks higher than night lockout in sparse mode:
+    # Operators deploying or waking the box at any time (including after 18:00) always
+    # receive immediate on-screen device feedback (battery %, schedule, name, storage status).
+    if event == "boot":
+        return True
 
-    # 3. Nocturnal capture hours (18:00 to 06:00):
-    # During nighttime capture hours, field displays provide zero human value and
-    # risk brownouts/delays during photo sessions.
+    # 4. Shutdown / Sleep:
+    dt = now_dt or datetime.now()
     if dt.year >= 2024:
         is_night = (dt.hour >= 18 or dt.hour < 6)
         if is_night:
-            # Exception: final sleep of the night session (e.g. dawn shutdown with long sleep > 2h
-            # until the next night's session). Ensures morning collection operators see the night's summary!
-            if event == "shutdown" and next_epoch is not None:
+            # Exception: final sleep of the night session (sleep > 2h until next session).
+            # Ensures morning collection operators see the completed night summary!
+            if next_epoch is not None:
                 now_epoch = time.time()
                 sleep_duration = next_epoch - now_epoch
                 if sleep_duration > 7200:
                     log_info(f"ePaper sparse mode: night session complete (sleep {sleep_duration/3600:.1f}h > 2h) -- updating dawn summary display.")
                     return True
 
-            log_info(f"ePaper sparse mode: nocturnal blackout active ({dt.strftime('%H:%M')} in 18:00-06:00) -- skipping display refresh.")
+            log_info(f"ePaper sparse mode: nocturnal shutdown blackout active ({dt.strftime('%H:%M')} in 18:00-06:00) -- skipping display refresh.")
             return False
 
-    # 4. Daytime (06:00 to 18:00):
-    # Always allow updates on wake (boot) and shutdown/sleep so operators always receive
-    # immediate feedback when deploying or collecting the box in the field.
-    if event in ("boot", "shutdown"):
-        return True
-
-    return False
+    # Daytime shutdown (06:00 to 18:00) allows display refresh for collection feedback
+    return True
 
 
 def configure_wifi_for_mode(mode):

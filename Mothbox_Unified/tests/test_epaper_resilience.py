@@ -82,21 +82,21 @@ class TestEpaperResilience(unittest.TestCase):
         self.assertTrue(self.should_update_display("boot", settings, "OFF", now_dt=night_dt))
 
     def test_nocturnal_blackout_in_sparse_mode(self):
-        """Sparse mode must completely suppress ePaper updates during 18:00 - 06:00."""
+        """Sparse mode suppresses ePaper updates on nocturnal shutdown, but boot/wake ranks higher to allow deployment."""
         settings = {"epaper_mode": "sparse"}
 
         night_hours = [18, 19, 21, 23, 0, 1, 3, 5]
         for hr in night_hours:
             dt = datetime(2026, 10, 18, hr, 15, 0)
-            # Boot during night
-            self.assertFalse(
+            # Boot during night: always allowed so deployments at any hour get feedback!
+            self.assertTrue(
                 self.should_update_display("boot", settings, "ACTIVE", now_dt=dt),
-                f"Failed: ePaper updated at {hr}:15 during nocturnal blackout"
+                f"Failed: ePaper boot update blocked at {hr}:15 in sparse mode"
             )
-            # Shutdown during night
+            # Hourly shutdown during night: locked out to eliminate brownouts & save battery
             self.assertFalse(
                 self.should_update_display("shutdown", settings, "ACTIVE", next_epoch=1000000 + 3600, now_dt=dt),
-                f"Failed: ePaper updated on shutdown at {hr}:15 during nocturnal blackout"
+                f"Failed: ePaper updated on hourly shutdown at {hr}:15 during nocturnal blackout"
             )
 
     def test_dawn_summary_update_in_sparse_mode(self):

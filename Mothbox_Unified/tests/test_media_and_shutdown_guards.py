@@ -362,12 +362,12 @@ class TestMediaAndShutdownGuards(unittest.TestCase):
         settings = {"epaper_mode": "sparse"}
         night_dt = datetime(2026, 10, 18, 23, 0, 0)  # 11:00 PM (nighttime blackout)
 
-        # Without warning: nocturnal blackout suppresses update
-        self.assertFalse(should_update_display("boot", settings, "ACTIVE", now_dt=night_dt))
+        # Without warning: nocturnal shutdown blackout suppresses update
+        self.assertFalse(should_update_display("shutdown", settings, "ACTIVE", next_epoch=1000000 + 3600, now_dt=night_dt))
 
-        # With media warning: must FORCE update so operator sees the warning on deployment
+        # With media warning: must FORCE update so operator sees the warning on deployment or shutdown
         atomic_update(str(self.control_root / "media_warning.txt"), "media_warning", "NO USB DRIVE")
-        self.assertTrue(should_update_display("boot", settings, "ACTIVE", now_dt=night_dt))
+        self.assertTrue(should_update_display("shutdown", settings, "ACTIVE", next_epoch=1000000 + 3600, now_dt=night_dt))
 
     # -------------------------------------------------------------------------
     # 6. UpdateDisplay Warning Banner Rendering
