@@ -233,7 +233,7 @@ def configure_wifi_for_mode(mode):
     else:
         print(f"Mode is {mode} -- disabling wifi")
         subprocess.run(["bash", f"{MOTHPOWER}/lowpower.sh"], check=False)
-        
+
 def get_pi_ram_mb():
     """Returns total RAM in MB by reading /proc/meminfo, or None on failure."""
     try:
@@ -626,7 +626,7 @@ def find_file(path, filename, depth=1):
 
 SETTING_DEFAULTS = {
     "runtime":      0,
-    "photo_interval": 1, 
+    "photo_interval": 1,
     "capture_mode": "timelapse",
     "burst_count":  8,
     "burst_interval_s": 6.0,
@@ -1372,10 +1372,10 @@ def run_shutdown_pi5(early_reason=None):
 
     # Write mode to controls.txt
     #set_Mode("/boot/firmware/mothbox_custom/system/controls.txt", "STANDBY")
-    
+
     mode="STANDBY"
     atomic_update_kv(os.path.join(CONTROL_ROOT, "mode.txt"), "mode", mode)
-    
+
     #Epaper
     #Update the Epaper screen if policy allows
     if should_update_display("shutdown", settings, mode, next_epoch=next_epoch_time):
@@ -1476,14 +1476,14 @@ def run_shutdown_pi5_FAST(early_reason=None):
     elif early_reason:
         log_info(f"Early shutdown active ({early_reason}) -- session window guard bypassed.")
     # --- End guard ---
-    
+
     arm_shutdown_deadman()
 
     #Stop big lights from turning on!
     offlight_script_path = "/home/pi/Desktop/Mothbox/Attract_Off.py"
     # Call the script using subprocess.run
     run_mode_script(offlight_script_path)
-    
+
     # SCHEDULE WAKEUP AGAIN FOR SECURITY
     settings = load_settings_for_wakeup()
     cron_source = switch_schedule if use_switch_schedule else settings
@@ -1939,7 +1939,7 @@ def run_mode_script(script_path):
         log_warn(f"Could not run {script_path}: {e}")
 
 
-# Check if now is in schedule 
+# Check if now is in schedule
 
 def parse_int_list(value):
     if isinstance(value, int):
@@ -2243,7 +2243,7 @@ if __name__ == "__main__":
     last_state = read_control("shutdown_state", "clean")
     if last_state != "clean":
         log_warn("⚠️  Previous shutdown was NOT clean (unexpected crash, brownout, or power cut).")
-    
+
         # 1. Break brownout death loop if battery is depleted
         if mothbox_hw is not None:
             try:
@@ -2355,7 +2355,7 @@ if __name__ == "__main__":
 
     log_section("STARTUP -- Identity")
     log_info(f"Auto-name enabled: {autoname}")
-    # Add option for people to manually set a name, but default to autoname made by pi5 serial number 
+    # Add option for people to manually set a name, but default to autoname made by pi5 serial number
     if(autoname=="true"):
         filename = "/home/pi/Desktop/Mothbox/wordlist.csv"  # Replace with your actual filename
         data = read_csv_into_lists(filename)
@@ -2389,7 +2389,7 @@ if __name__ == "__main__":
       computerName=manName
       atomic_update_kv(os.path.join(CONTROL_ROOT, "name.txt"), "name", manName)  # <- add this
       log_ok(f"Device name (manual): {computerName}")
-  
+
     # ---- End figure out name -----
 
 
@@ -2516,7 +2516,7 @@ if __name__ == "__main__":
                 settings[key] = value.replace(";", ",")
         cron_source = switch_schedule if use_switch_schedule else settings
         cron_expression = build_cron_expression(cron_source)
-    
+
         log_info(f"Cron expression : {cron_expression}")
         log_info(f"UTC offset      : {utc_off}")
 
@@ -2585,7 +2585,7 @@ if __name__ == "__main__":
         #set_Mode(controlsFpath, mode)
         log_info(f"Mode normalised to: {mode}")
 
-    # ----- Mode kills desktop mode for everything but DEBUG and PARTY   
+    # ----- Mode kills desktop mode for everything but DEBUG and PARTY
     configure_display_for_mode(mode)
 
     configure_wifi_for_mode(mode)
