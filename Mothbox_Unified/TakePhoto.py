@@ -857,15 +857,21 @@ def takePhoto_Manual():
         time.sleep(exposureset_delay)#need some time for the settings to sink into the camera)
         
         t_flash_start = time.monotonic()
+        p_idle = mothbox_hw.read_power() if mothbox_hw else {"voltage_v": -1.0, "current_a": 0.0}
         flash_fired = flashOn(max_duration_s=1.5)
         request = None
+        p_flash = None
         try:
             if flash_fired:
                 time.sleep(0.005)  # 5ms MOSFET gate & phosphor stabilization buffer
             try:
                 request = picam2.capture_request(flush=True, wait=CAPTURE_TIMEOUT_S)
+                if flash_fired and mothbox_hw:
+                    p_flash = mothbox_hw.read_power()
             except TypeError:
                 request = picam2.capture_request(flush=True)
+                if flash_fired and mothbox_hw:
+                    p_flash = mothbox_hw.read_power()
         except Exception as e:
             flashOff()
             warn_no_camera(f"no frame from camera: {e.__class__.__name__}: {e}")
@@ -873,7 +879,14 @@ def takePhoto_Manual():
             flashOff()
             t_flash_dur = time.monotonic() - t_flash_start
             if flash_fired:
-                print(f"[TakePhoto] Photo {i + 1} flash strobe duration: {t_flash_dur * 1000.0:.1f}ms (single frame covered)")
+                if p_flash and p_flash.get("voltage_v", -1) > 0 and p_idle.get("voltage_v", -1) > 0:
+                    v_idle = p_idle["voltage_v"]
+                    v_fl = p_flash["voltage_v"]
+                    a_fl = p_flash["current_a"]
+                    sag = v_idle - v_fl
+                    print(f"[TakePhoto] Photo {i + 1} flash: {t_flash_dur * 1000.0:.1f}ms | Idle: {v_idle:.2f}V -> Flash: {v_fl:.2f}V @ {a_fl:.3f}A (sag -{sag:.2f}V)")
+                else:
+                    print(f"[TakePhoto] Photo {i + 1} flash strobe duration: {t_flash_dur * 1000.0:.1f}ms (single frame covered)")
 
         flashtime=time.time()-start
 
@@ -1094,15 +1107,21 @@ def takePhoto_Burst(burst_count=8, interval_s=6.0):
 
         # Pulse flash for this single frame with rolling shutter window coverage
         t_flash_start = time.monotonic()
+        p_idle = mothbox_hw.read_power() if mothbox_hw else {"voltage_v": -1.0, "current_a": 0.0}
         flash_fired = flashOn(max_duration_s=1.5)
         request = None
+        p_flash = None
         try:
             if flash_fired:
                 time.sleep(0.005)  # 5ms MOSFET gate & phosphor stabilization buffer
             try:
                 request = picam2.capture_request(flush=True, wait=CAPTURE_TIMEOUT_S)
+                if flash_fired and mothbox_hw:
+                    p_flash = mothbox_hw.read_power()
             except TypeError:
                 request = picam2.capture_request(flush=True)
+                if flash_fired and mothbox_hw:
+                    p_flash = mothbox_hw.read_power()
         except Exception as e:
             flashOff()
             warn_no_camera(f"no frame from camera in burst frame {k + 1}: {e.__class__.__name__}: {e}")
@@ -1111,7 +1130,14 @@ def takePhoto_Burst(burst_count=8, interval_s=6.0):
             flashOff()
             t_flash_dur = time.monotonic() - t_flash_start
             if flash_fired:
-                print(f"[Burst] Frame {k + 1} flash strobe duration: {t_flash_dur * 1000.0:.1f}ms (single frame covered)")
+                if p_flash and p_flash.get("voltage_v", -1) > 0 and p_idle.get("voltage_v", -1) > 0:
+                    v_idle = p_idle["voltage_v"]
+                    v_fl = p_flash["voltage_v"]
+                    a_fl = p_flash["current_a"]
+                    sag = v_idle - v_fl
+                    print(f"[Burst] Frame {k + 1} flash: {t_flash_dur * 1000.0:.1f}ms | Idle: {v_idle:.2f}V -> Flash: {v_fl:.2f}V @ {a_fl:.3f}A (sag -{sag:.2f}V)")
+                else:
+                    print(f"[Burst] Frame {k + 1} flash strobe duration: {t_flash_dur * 1000.0:.1f}ms (single frame covered)")
 
         try:
             pil_image = request.make_image("main")

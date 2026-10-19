@@ -95,6 +95,7 @@ def stream_feed():
                         a = parts[2]
                         n_photos = parts[3]
                         mode = parts[4]
+                        p_tag = parts[5] if len(parts) >= 6 else "IDLE"
                         # Determine battery health color
                         try:
                             vf = float(v)
@@ -102,19 +103,25 @@ def stream_feed():
                         except Exception:
                             pwr_col = CYAN
 
-                        print(f"{DIM}[{ts}]{RESET} {BOLD}{pwr_col}[POWER]{RESET} {v}V / {a}A  |  {BOLD}[PHOTOS]{RESET} {n_photos} saved  |  {BOLD}[MODE]{RESET} {mode}", flush=True)
+                        tag_label = f"[{p_tag} POWER]" if p_tag == "IDLE" else f"{YELLOW}[FLASH ACTIVE]{RESET}"
+                        print(f"{DIM}[{ts}]{RESET} {BOLD}{pwr_col}{tag_label}{RESET} {v}V / {a}A  |  {BOLD}[PHOTOS]{RESET} {n_photos} saved  |  {BOLD}[MODE]{RESET} {mode}", flush=True)
 
                 elif line.startswith("__MB_TP__"):
                     msg = line[9:]
-                    if "flash" in msg.lower() or "burst" in msg.lower():
+                    if "sag -" in msg:
+                        print(f"{DIM}[{ts}]{RESET} {YELLOW}{BOLD}⚡ [FLASH SAG]{RESET} {BOLD}{msg}{RESET}", flush=True)
+                    elif "flash" in msg.lower() or "burst" in msg.lower():
                         col = CYAN
+                        print(f"{DIM}[{ts}]{RESET} {col}📸 [TakePhoto] {msg}{RESET}", flush=True)
                     elif "saved" in msg.lower() or "complete" in msg.lower():
                         col = GREEN + BOLD
+                        print(f"{DIM}[{ts}]{RESET} {col}📸 [TakePhoto] {msg}{RESET}", flush=True)
                     elif "error" in msg.lower() or "fail" in msg.lower() or "abort" in msg.lower():
                         col = RED + BOLD
+                        print(f"{DIM}[{ts}]{RESET} {col}📸 [TakePhoto] {msg}{RESET}", flush=True)
                     else:
                         col = RESET
-                    print(f"{DIM}[{ts}]{RESET} {col}📸 [TakePhoto] {msg}{RESET}", flush=True)
+                        print(f"{DIM}[{ts}]{RESET} {col}📸 [TakePhoto] {msg}{RESET}", flush=True)
 
                 elif line.startswith("__MB_SCH__"):
                     msg = line[10:]
