@@ -22,39 +22,36 @@ TODO:
 """
 import os
 import sys
-#######---- Check for Boot lock ------
+#######---- Single instance & Boot lock guards ------
 import time
-BOOT_LOCK = "/run/boot_script_running"
-
-if os.path.exists(BOOT_LOCK):
-    sys.exit(0)
-
-
-#######---- One TakePhoto at a time ------
-# cron fires every minute, but a full-resolution capture can take longer than
-# that on a throttled Pi. Overlapping runs fight over the camera (the loser
-# dies with "Camera __init__ sequence did not complete") and burn CPU on a
-# photo that will never happen -- which is heat the box cannot afford.
 import fcntl
 import errno
 
+BOOT_LOCK = "/run/boot_script_running"
 _photo_lock = None
-for _lock_candidate in ["/run/mothbox_takephoto.lock", "/tmp/mothbox_takephoto.lock"]:
-    try:
-        _photo_lock = open(_lock_candidate, "a+")
-        fcntl.flock(_photo_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        break
-    except (BlockingIOError, OSError) as e:
-        if isinstance(e, BlockingIOError) or getattr(e, "errno", None) in (errno.EAGAIN, errno.EWOULDBLOCK):
-            print("[TakePhoto] a previous photo is still in progress -- skipping this cycle")
-            sys.exit(0)
-        if isinstance(e, PermissionError) or getattr(e, "errno", None) == errno.EACCES:
-            continue
-        print(f"[TakePhoto] could not take the single-instance lock ({e}); continuing anyway")
-        break
-    except Exception as e:
-        print(f"[TakePhoto] could not take the single-instance lock ({e}); continuing anyway")
-        break
+
+def acquire_photo_lock():
+    global _photo_lock
+    if os.path.exists(BOOT_LOCK):
+        sys.exit(0)
+
+    for _lock_candidate in ["/run/mothbox_takephoto.lock", "/tmp/mothbox_takephoto.lock"]:
+        try:
+            _photo_lock = open(_lock_candidate, "a+")
+            fcntl.flock(_photo_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except (BlockingIOError, OSError) as e:
+            if isinstance(e, BlockingIOError) or getattr(e, "errno", None) in (errno.EAGAIN, errno.EWOULDBLOCK):
+                print("[TakePhoto] a previous photo is still in progress -- skipping this cycle")
+                sys.exit(0)
+            if isinstance(e, PermissionError) or getattr(e, "errno", None) == errno.EACCES:
+                continue
+            print(f"[TakePhoto] could not take the single-instance lock ({e}); continuing anyway")
+            return True
+        except Exception as e:
+            print(f"[TakePhoto] could not take the single-instance lock ({e}); continuing anyway")
+            return True
+    return True
 
 #-----------------------------##
 
@@ -1207,6 +1204,7 @@ def get_storage_info(path):
 #---------------MAIN CODE--------------------- #
 
 if __name__ == "__main__":
+    acquire_photo_lock()
     mode = read_control(CONTROL_ROOT / "mode.txt", "mode", "ACTIVE")
     if mode in ("OFF", "STANDBY"):
         print("Mothbox is in", mode, "mode, not taking photos")
