@@ -22,6 +22,11 @@ TODO:
 """
 import os
 import sys
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
 #######---- Single instance & Boot lock guards ------
 import time
 import fcntl
@@ -884,9 +889,9 @@ def takePhoto_Manual():
                     v_fl = p_flash["voltage_v"]
                     a_fl = p_flash["current_a"]
                     sag = v_idle - v_fl
-                    print(f"[TakePhoto] Photo {i + 1} flash: {t_flash_dur * 1000.0:.1f}ms | Idle: {v_idle:.2f}V -> Flash: {v_fl:.2f}V @ {a_fl:.3f}A (sag -{sag:.2f}V)")
+                    print(f"[TakePhoto] Photo {i + 1} flash: {t_flash_dur * 1000.0:.1f}ms | Idle: {v_idle:.2f}V -> Flash: {v_fl:.2f}V @ {a_fl:.3f}A (sag -{sag:.2f}V)", flush=True)
                 else:
-                    print(f"[TakePhoto] Photo {i + 1} flash strobe duration: {t_flash_dur * 1000.0:.1f}ms (single frame covered)")
+                    print(f"[TakePhoto] Photo {i + 1} flash strobe duration: {t_flash_dur * 1000.0:.1f}ms (single frame covered)", flush=True)
 
         flashtime=time.time()-start
 
@@ -1135,9 +1140,9 @@ def takePhoto_Burst(burst_count=8, interval_s=6.0):
                     v_fl = p_flash["voltage_v"]
                     a_fl = p_flash["current_a"]
                     sag = v_idle - v_fl
-                    print(f"[Burst] Frame {k + 1} flash: {t_flash_dur * 1000.0:.1f}ms | Idle: {v_idle:.2f}V -> Flash: {v_fl:.2f}V @ {a_fl:.3f}A (sag -{sag:.2f}V)")
+                    print(f"[Burst] Frame {k + 1} flash: {t_flash_dur * 1000.0:.1f}ms | Idle: {v_idle:.2f}V -> Flash: {v_fl:.2f}V @ {a_fl:.3f}A (sag -{sag:.2f}V)", flush=True)
                 else:
-                    print(f"[Burst] Frame {k + 1} flash strobe duration: {t_flash_dur * 1000.0:.1f}ms (single frame covered)")
+                    print(f"[Burst] Frame {k + 1} flash strobe duration: {t_flash_dur * 1000.0:.1f}ms (single frame covered)", flush=True)
 
         try:
             pil_image = request.make_image("main")
