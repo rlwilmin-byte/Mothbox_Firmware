@@ -92,6 +92,9 @@ except Exception as _e:
     print(f"[Scheduler] mothbox_hw unavailable ({_e}); scripts will assume Mothbox Pro")
     mothbox_hw = None
 
+# Path to user configuration CSV
+usersettingsFpath = "/boot/firmware/mothbox_custom/mothbox_settings.csv"
+
 # -----Scheduler Functions-------------------
 def configure_display_for_mode(mode):
     """
@@ -641,13 +644,15 @@ SETTING_DEFAULTS = {
     "enable_gps":   False,
 }
 
-def load_settings_for_wakeup():
+def load_settings_for_wakeup(filepath=None):
     """
     Safely loads settings needed to calculate the next wakeup alarm.
     Falls back to SETTING_DEFAULTS if the CSV is missing or corrupt.
     Never returns None.
     """
-    settings = load_settings(usersettingsFpath)
+    if filepath is None:
+        filepath = globals().get("usersettingsFpath", "/boot/firmware/mothbox_custom/mothbox_settings.csv")
+    settings = load_settings(filepath)
 
     if settings is None:
         print("[!] WARNING: Could not load settings for wakeup -- using defaults")

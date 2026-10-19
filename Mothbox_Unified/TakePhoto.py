@@ -288,15 +288,16 @@ def reset_aborted_captures():
     except Exception:
         pass
 
-def trigger_early_shutdown(reason="storage_full_10_aborts"):
+def trigger_early_shutdown(reason="storage_full_10_aborts", mode=None):
     """
     Signals Scheduler.py to shut down early. If Scheduler.py is not running,
-    invokes Scheduler.py --early-shutdown directly.
+    invokes Scheduler.py --early-shutdown directly. Returns True if shutdown was
+    dispatched, False if suppressed by mode.
     """
-    current_mode = read_control(CONTROL_ROOT / "mode.txt", "mode", "ACTIVE")
+    current_mode = mode if mode is not None else read_control(CONTROL_ROOT / "mode.txt", "mode", "ACTIVE")
     if current_mode in ("DEBUG", "PARTY"):
         print(f"[TakePhoto] In {current_mode} mode -- suppressing early shutdown ({reason}).")
-        return
+        return False
 
     try:
         atomic_update_kv(EARLY_SHUTDOWN_FILE, "early_shutdown_reason", reason)
@@ -318,6 +319,8 @@ def trigger_early_shutdown(reason="storage_full_10_aborts"):
             subprocess.Popen(["python3", "/home/pi/Desktop/Mothbox/Scheduler.py", "--early-shutdown"])
     except Exception as e:
         print(f"[TakePhoto] Error triggering early shutdown: {e}")
+
+    return True
 
 def run_cmd(cmd):
     """Run a shell command safely"""
