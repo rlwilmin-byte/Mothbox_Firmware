@@ -193,7 +193,12 @@ def should_update_display(event, settings_dict, current_mode, next_epoch=None, n
         return True
 
     # 4. Shutdown / Sleep:
-    dt = now_dt or datetime.now()
+    if now_dt:
+        dt = now_dt
+    elif hasattr(datetime, "datetime"):
+        dt = datetime.datetime.now()
+    else:
+        dt = datetime.now()
     if dt.year >= 2024:
         is_night = (dt.hour >= 18 or dt.hour < 6)
         if is_night:
