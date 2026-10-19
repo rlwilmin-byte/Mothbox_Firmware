@@ -418,13 +418,17 @@ def get_uptime_s():
         return 0.0
 
 
-def run_stress_battery(runs=3, burst_count=5, burst_interval=6.0):
+def run_stress_battery(runs=3, burst_count=5, burst_interval=6.0, skip_rails=False):
     initial_boot_id = get_boot_id()
     initial_uptime = get_uptime_s()
 
+    active_tests = dict(TEST_REGISTRY)
+    if skip_rails:
+        active_tests.pop("power_sag", None)
+
     print("=" * 78)
     print("       MOTHBOX SYSTEMATIC RELIABILITY & STRESS TEST BATTERY")
-    print(f"       Iterations: {runs} | Burst Config: {burst_count}X @ {burst_interval}s | Randomized Execution")
+    print(f"       Iterations: {runs} | Burst Config: {burst_count}X @ {burst_interval}s | Rails Test: {'SKIPPED (Splitter Bypass)' if skip_rails else 'ACTIVE'}")
     print(f"       Boot ID: {initial_boot_id} | Starting Uptime: {initial_uptime:.1f}s")
     print("=" * 78)
 
@@ -432,7 +436,7 @@ def run_stress_battery(runs=3, burst_count=5, burst_interval=6.0):
     power_faults = 0
 
     for run_idx in range(1, runs + 1):
-        order = list(TEST_REGISTRY.keys())
+        order = list(active_tests.keys())
         random.shuffle(order)
 
         print(f"\n{'#' * 78}")
@@ -481,7 +485,7 @@ def run_stress_battery(runs=3, burst_count=5, burst_interval=6.0):
     print("                     SYSTEMATIC RELIABILITY SCORECARD")
     print("=" * 78)
 
-    test_keys = list(TEST_REGISTRY.keys())
+    test_keys = list(active_tests.keys())
     header = f"{'Subsystem / Test Suite':<22} | " + " | ".join([f"Run {i}" for i in range(1, runs + 1)]) + " | Ops Done (%) | Score"
     print(header)
     print("-" * len(header))
@@ -551,7 +555,8 @@ if __name__ == "__main__":
     parser.add_argument("--runs", type=int, default=3, help="Number of randomized stress runs (default: 3)")
     parser.add_argument("--burst-count", type=int, default=5, help="Photos per burst cycle (default: 5)")
     parser.add_argument("--burst-interval", type=float, default=6.0, help="Interval in seconds between burst photos (default: 6.0)")
+    parser.add_argument("--skip-rails", action="store_true", help="Skip 12V actuator switching test (useful for multi-battery splitter configurations)")
     args = parser.parse_args()
 
-    ok = run_stress_battery(runs=args.runs, burst_count=args.burst_count, burst_interval=args.burst_interval)
+    ok = run_stress_battery(runs=args.runs, burst_count=args.burst_count, burst_interval=args.burst_interval, skip_rails=args.skip_rails)
     sys.exit(0 if ok else 1)
