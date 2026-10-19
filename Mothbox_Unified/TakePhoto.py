@@ -621,9 +621,13 @@ def run_calibration():
             pwr = mothbox_hw.read_power()
             v = pwr.get("voltage_v", -1.0)
             if 0.0 < v < 11.8:
-                print(f"[TakePhoto] Battery voltage ({v:.2f}V < 11.8V) -- using attractor lights for AF to avoid extended flash brownout.")
+                print(f"[TakePhoto] Battery voltage ({v:.2f}V < 11.8V) -- using single channel (CH1) for AF to prevent regulator overload.")
                 use_flash_for_af = False
-                mothbox_hw.attract_on()
+                if mothbox_hw.is_pro():
+                    mothbox_hw.rail_12v(True)
+                    mothbox_hw._out(mothbox_hw.PRO["CH1"], True)
+                else:
+                    mothbox_hw._out(mothbox_hw.DIY["RELAY_ATTRACT_A"], False)
         except Exception:
             pass
     if use_flash_for_af:
@@ -660,8 +664,13 @@ def run_calibration():
     #picam2.start(show_preview=True, ) #preview has to be on for some reason to work
     success = picam2.autofocus_cycle()
 
-    #picam2.pre_callback = None
     flashOff()
+    if not use_flash_for_af and mothbox_hw is not None:
+        if mothbox_hw.is_pro():
+            mothbox_hw._out(mothbox_hw.PRO["CH1"], False)
+            mothbox_hw.rail_12v(False)
+        else:
+            mothbox_hw._out(mothbox_hw.DIY["RELAY_ATTRACT_A"], True)
     print("Autofocus completed! "+str(time.time()-afstart))
     md = picam2.capture_metadata()
     
