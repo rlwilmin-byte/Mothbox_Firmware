@@ -1038,6 +1038,22 @@ def check_media_health(mounts_file="/proc/mounts"):
     return warning
 
 
+def is_takephoto_active():
+    """Returns True if TakePhoto.py is currently executing or holding its single-instance lock."""
+    for lock_path in ["/run/mothbox_takephoto.lock", "/tmp/mothbox_takephoto.lock"]:
+        if os.path.exists(lock_path):
+            try:
+                import fcntl
+                with open(lock_path, "r") as f:
+                    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(f, fcntl.LOCK_UN)
+            except (BlockingIOError, OSError):
+                return True
+            except Exception:
+                pass
+    return False
+
+
 def schedule_shutdown(minutes):
     """Schedules the execution of shutdown after the specified delay in minutes."""
     if rpiModel == 4:
@@ -1069,8 +1085,8 @@ def schedule_shutdown(minutes):
                 last_voltage_check = now_time
                 if mothbox_hw is not None:
                     try:
-                        # Never sample during an active flash strobe (dynamic pulse sag is not battery depletion)
-                        if hasattr(mothbox_hw, "flash_is_on") and mothbox_hw.flash_is_on():
+                        # Skip if TakePhoto is active or flash is firing (dynamic strobe sag is not battery depletion)
+                        if is_takephoto_active() or (hasattr(mothbox_hw, "flash_is_on") and mothbox_hw.flash_is_on()):
                             pass
                         else:
                             p = mothbox_hw.read_power()
@@ -1078,7 +1094,7 @@ def schedule_shutdown(minutes):
                             if 0.0 < v < 9.8:
                                 # Debounce: re-sample after 2.0s to confirm persistent resting voltage, not transient recovery
                                 time.sleep(2.0)
-                                if not (hasattr(mothbox_hw, "flash_is_on") and mothbox_hw.flash_is_on()):
+                                if not is_takephoto_active() and not (hasattr(mothbox_hw, "flash_is_on") and mothbox_hw.flash_is_on()):
                                     p2 = mothbox_hw.read_power()
                                     v2 = float(p2.get("voltage_v", -1))
                                     if 0.0 < v2 < 9.8:
