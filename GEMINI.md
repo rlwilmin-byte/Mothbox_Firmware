@@ -49,6 +49,23 @@ When testing on a live Mothbox:
 
 ---
 
+## 5. User Preferred Deployment Profile (Default for all SD Flashes)
+Whenever creating, restoring, or flashing an SD card or target Mothbox, ALWAYS populate `mothbox_settings.csv` from [preferred_mothbox_settings.csv](file:///home/rlw-lidar-pc/Documents/Mothbox/Mothbox_Firmware/preferred_mothbox_settings.csv) in the repository root:
+- **Timezone:** `Australia/Sydney` (AEDT, UTC+11)
+- **Schedule (Schedule B):** `hour,19;20;21;22;23;0;1;2;3;4;5` (dusk-to-dawn hourly)
+- **Runtime:** `runtime, 55` (55m capture window, 5m deep sleep cold settlement before next hour)
+- **Weekday:** `weekday,1;2;3;4;5;6;7`
+- **Capture Mode:** `capture_mode,burst`
+- **Burst Count:** `burst_count,8`
+- **Burst Interval:** `burst_interval_s,6`
+- **Photo Interval:** `photo_interval,1`
+- **Backup Interval:** `backup_interval,5`
+- **Hardware:** `hardware,pro`
+- **ePaper Mode:** `epaper_mode,sparse`
+- **GPS:** `enable_gps,False`
+
+---
+
 ## Execution & Token Safeguards
 - **No Autonomous File Sweeps:** Never recursively read files across the repository without asking first. Look only at specifically referenced paths.
 - **Subagent Boundaries:** Do not spawn background worker subagents or multi-step execution loops autonomously. If a task requires more than 3 steps, present an action plan for approval first.
