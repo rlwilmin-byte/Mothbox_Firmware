@@ -261,6 +261,8 @@ def test_rapid_burst_cadence(count=5, interval=6.0):
         except Exception:
             pass
 
+    (STATE_ROOT / "last_photo_time.txt").unlink(missing_ok=True)
+
     with open(STATE_ROOT / "capture_mode.txt", "w") as f:
         f.write("capture_mode=burst\n")
     with open(STATE_ROOT / "burst_count.txt", "w") as f:
