@@ -41,13 +41,13 @@ This version:
 BOOT_LOCK = "/run/boot_script_running"
 
 # create lock
-try:
-    with open(BOOT_LOCK, "w") as f:
-        f.write("booting\n")
-except (PermissionError, OSError) as e:
-    # If running as non-root or /run is unwritable, don't crash imports
-    pass
-
+# create lock (only when executed directly as script, never on module import)
+if __name__ == "__main__":
+    try:
+        with open(BOOT_LOCK, "w") as f:
+            f.write("booting\n")
+    except (PermissionError, OSError):
+        pass
 #-------------------#
 
 
@@ -2126,620 +2126,637 @@ def log_info(msg):
     print(f"  \u2022  {msg}")
 
 
-# Boot header -- printed before anything else so the log
-# boundary is always visible even if startup crashes early
-_boot_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-print()
-print("\u2554" + "\u2550" * 58 + "\u2557")
-print("\u2551" + "       MOTHBOX SCHEDULER  \u2014  STARTING             " + "\u2551")
-print(f"\u2551  Boot time : {_boot_time:<44} \u2551")
-print("\u255a" + "\u2550" * 58 + "\u255d")
 
-log_section("STARTUP -- Hardware")
-
-rpiModel = None
-rpiModel = determinePiModel()
-
-if rpiModel == 4:
-    log_warn("Pi 4 is not fully supported -- it cannot wake itself back up without a PiJuice.")
-    log_info("Use an older image if you need Pi 4 support.")
-
-if rpiModel == 5:
-    # --------------------------------------------------------------------
-    # EEPROM provisioning -- delegated to eeprom_safe.py
-    #
-    # ensure_eeprom_configured() is gated by a persistent flag so it only
-    # ever does real work once. If a change is needed it stages the update
-    # and performs a CLEAN REBOOT to apply it (never a halt/wake-alarm
-    # power-off), then verifies the live config on the next boot before
-    # declaring success. This is what prevents the "reflash the bootloader"
-    # corruption that happened when the old code staged a flash and then
-    # powered off in the same boot.
-    # --------------------------------------------------------------------
-    eeprom_status = ensure_eeprom_configured()
-
-    if eeprom_status == "rebooting":
-        # A reboot has already been issued inside ensure_eeprom_configured().
-        # Stop this boot's script here; the next boot will pick up from a
-        # clean slate once the EEPROM flash has been applied.
-        log_info("EEPROM update staged -- rebooting cleanly to apply. Exiting this boot.")
-        sys.exit(0)
-    elif eeprom_status == "ok":
-        log_ok("EEPROM settings verified correct.")
-    elif eeprom_status == "failed":
-        log_warn("EEPROM flash did NOT take after repeated attempts -- error pattern "
-                 "was blinked on the onboard LED. Continuing boot in a degraded state "
-                 "(device may not fully power off on halt until this is resolved).")
-    elif eeprom_status == "defer":
-        log_info("First-boot filesystem resize not finished yet -- EEPROM check deferred "
-                 "to a future boot.")
-
-# Which Mothbox is this? Detected every boot (an SD card can move between
-# boxes) and cached in controls/hardware.txt for every other script to read.
-# See mothbox_hw.py for how: the Pro PCB's I2C switch expanders are the tell.
-if mothbox_hw is not None:
-    try:
-        _hw = mothbox_hw.detect_hardware(write_cache=True, verbose=False)
-        log_ok(f"Mothbox hardware: {_hw['hardware'].upper()}  (by {_hw['detected_by']}; "
-               f"i2c: {[hex(a) for a in _hw['i2c_found']] or 'none'}; "
-               f"voltage sensor: {_hw['voltage_sensor']}; light sensor: {_hw['light_sensor']})")
-        if _hw["hardware"] == "diy":
-            log_info("DIY build: relay-HAT lights, OFF/DEBUG jumpers only, schedule from the CSV.")
-    except Exception as e:
-        log_warn(f"Hardware detection failed ({e}); scripts will assume Mothbox Pro.")
-
-# Figuring out the controls and settings
-controlsFpath="/boot/firmware/mothbox_custom/system"
-# Control files live on the JOURNALED ext4 root now -- see mothbox_paths.py.
-# The FAT boot partition also holds config.txt and the kernel, so a power cut
-# mid-write there can leave a box that will not boot at all (Oct 2026).
+# Default module-level variables (populated during main execution)
+rpiModel = 5
+use_switch_schedule = False
+switch_schedule = None
+runtime = 59
+utc_off = 0.0
+mode = "ACTIVE"
 try:
     from mothbox_paths import STATE_ROOT as _STATE_ROOT, resolve_read as _resolve_read, ensure_state_dir as _ensure_state_dir
     CONTROL_ROOT = str(_ensure_state_dir())
-except Exception as _e:
-    print(f"[Scheduler] mothbox_paths unavailable ({_e}); using the legacy boot-partition controls")
-    CONTROL_ROOT = os.path.join(controlsFpath, "controls")
+except Exception:
+    CONTROL_ROOT = "/boot/firmware/mothbox_custom/system/controls"
     def _resolve_read(p):
         return p
-os.makedirs(CONTROL_ROOT, exist_ok=True)
 
-if "--early-shutdown" in sys.argv:
-    early_reason = read_control("early_shutdown_reason", "cli_request")
-    log_section(f"EARLY SHUTDOWN -- Direct Request ({early_reason})")
-    run_shutdown_pi5(early_reason=early_reason)
-    sys.exit(0)
+if __name__ == "__main__":
+    # Boot header -- printed before anything else so the log
+    # boundary is always visible even if startup crashes early
+    _boot_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print()
+    print("\u2554" + "\u2550" * 58 + "\u2557")
+    print("\u2551" + "       MOTHBOX SCHEDULER  \u2014  STARTING             " + "\u2551")
+    print(f"\u2551  Boot time : {_boot_time:<44} \u2551")
+    print("\u255a" + "\u2550" * 58 + "\u255d")
 
-# --------------------------------------------------------------------
-# Clean Flight & Crash Recovery Guard
-# --------------------------------------------------------------------
-shutdown_state_file = os.path.join(CONTROL_ROOT, "shutdown_state.txt")
-last_state = read_control("shutdown_state", "clean")
-if last_state != "clean":
-    log_warn("⚠️  Previous shutdown was NOT clean (unexpected crash, brownout, or power cut).")
-    
-    # 1. Break brownout death loop if battery is depleted
+    log_section("STARTUP -- Hardware")
+
+    rpiModel = None
+    rpiModel = determinePiModel()
+
+    if rpiModel == 4:
+        log_warn("Pi 4 is not fully supported -- it cannot wake itself back up without a PiJuice.")
+        log_info("Use an older image if you need Pi 4 support.")
+
+    if rpiModel == 5:
+        # --------------------------------------------------------------------
+        # EEPROM provisioning -- delegated to eeprom_safe.py
+        #
+        # ensure_eeprom_configured() is gated by a persistent flag so it only
+        # ever does real work once. If a change is needed it stages the update
+        # and performs a CLEAN REBOOT to apply it (never a halt/wake-alarm
+        # power-off), then verifies the live config on the next boot before
+        # declaring success. This is what prevents the "reflash the bootloader"
+        # corruption that happened when the old code staged a flash and then
+        # powered off in the same boot.
+        # --------------------------------------------------------------------
+        eeprom_status = ensure_eeprom_configured()
+
+        if eeprom_status == "rebooting":
+            # A reboot has already been issued inside ensure_eeprom_configured().
+            # Stop this boot's script here; the next boot will pick up from a
+            # clean slate once the EEPROM flash has been applied.
+            log_info("EEPROM update staged -- rebooting cleanly to apply. Exiting this boot.")
+            sys.exit(0)
+        elif eeprom_status == "ok":
+            log_ok("EEPROM settings verified correct.")
+        elif eeprom_status == "failed":
+            log_warn("EEPROM flash did NOT take after repeated attempts -- error pattern "
+                     "was blinked on the onboard LED. Continuing boot in a degraded state "
+                     "(device may not fully power off on halt until this is resolved).")
+        elif eeprom_status == "defer":
+            log_info("First-boot filesystem resize not finished yet -- EEPROM check deferred "
+                     "to a future boot.")
+
+    # Which Mothbox is this? Detected every boot (an SD card can move between
+    # boxes) and cached in controls/hardware.txt for every other script to read.
+    # See mothbox_hw.py for how: the Pro PCB's I2C switch expanders are the tell.
     if mothbox_hw is not None:
         try:
-            pwr = mothbox_hw.read_power()
-            v_rec = float(pwr.get("voltage_v", -1))
-            if 0 < v_rec < 10.8:
-                log_warn(f"[CRASH_RECOVERY] Battery voltage is critically low ({v_rec:.2f}V < 10.8V). "
-                         f"Aborting active session to prevent PMIC brownout crash loop.")
-                atomic_update_kv(os.path.join(CONTROL_ROOT, "mode.txt"), "mode", "STANDBY")
-                run_script("/home/pi/Desktop/Mothbox/Diagnostics.py", "Standby_Check", show_output=True)
-                run_shutdown_pi5_FAST()
-                sys.exit(0)
+            _hw = mothbox_hw.detect_hardware(write_cache=True, verbose=False)
+            log_ok(f"Mothbox hardware: {_hw['hardware'].upper()}  (by {_hw['detected_by']}; "
+                   f"i2c: {[hex(a) for a in _hw['i2c_found']] or 'none'}; "
+                   f"voltage sensor: {_hw['voltage_sensor']}; light sensor: {_hw['light_sensor']})")
+            if _hw["hardware"] == "diy":
+                log_info("DIY build: relay-HAT lights, OFF/DEBUG jumpers only, schedule from the CSV.")
         except Exception as e:
-            log_warn(f"[CRASH_RECOVERY] Battery voltage pre-check error ({e}) -- proceeding.")
+            log_warn(f"Hardware detection failed ({e}); scripts will assume Mothbox Pro.")
 
-    # 2. Heal read-only filesystem mounts if Linux protected corrupted drives
+    # Figuring out the controls and settings
+    controlsFpath="/boot/firmware/mothbox_custom/system"
+    # Control files live on the JOURNALED ext4 root now -- see mothbox_paths.py.
+    # The FAT boot partition also holds config.txt and the kernel, so a power cut
+    # mid-write there can leave a box that will not boot at all (Oct 2026).
     try:
-        if os.path.exists("/proc/mounts"):
-            with open("/proc/mounts", "r") as mf:
-                for line in mf:
-                    parts = line.strip().split()
-                    if len(parts) >= 4 and parts[1].startswith("/media/"):
-                        opts = parts[3].split(",")
-                        if "ro" in opts:
-                            dev_node = parts[0]
-                            mp_path = parts[1]
-                            log_warn(f"[CRASH_RECOVERY] {mp_path} mounted READ-ONLY after crash. Attempting remount rw...")
-                            subprocess.run(["sudo", "mount", "-o", "remount,rw", mp_path], check=False, timeout=10)
-    except Exception as e:
-        log_warn(f"[CRASH_RECOVERY] Mount check error ({e}).")
+        from mothbox_paths import STATE_ROOT as _STATE_ROOT, resolve_read as _resolve_read, ensure_state_dir as _ensure_state_dir
+        CONTROL_ROOT = str(_ensure_state_dir())
+    except Exception as _e:
+        print(f"[Scheduler] mothbox_paths unavailable ({_e}); using the legacy boot-partition controls")
+        CONTROL_ROOT = os.path.join(controlsFpath, "controls")
+        def _resolve_read(p):
+            return p
+    os.makedirs(CONTROL_ROOT, exist_ok=True)
 
-# Arm crash detection for this boot: if power cuts unexpectedly, next boot detects it
-atomic_update_kv(shutdown_state_file, "shutdown_state", "dirty")
+    if "--early-shutdown" in sys.argv:
+        early_reason = read_control("early_shutdown_reason", "cli_request")
+        log_section(f"EARLY SHUTDOWN -- Direct Request ({early_reason})")
+        run_shutdown_pi5(early_reason=early_reason)
+        sys.exit(0)
 
-# Safe defaults -- will be properly set after switch reading
-use_switch_schedule = False
-switch_schedule = {}
-
-usersettingsFpath="/boot/firmware/mothbox_custom/mothbox_settings.csv"
-
-
-
-
-log_section("STARTUP -- Configuration")
-
-settings = load_settings(usersettingsFpath)
-if settings is None:
-    log_warn("CRITICAL: Could not load settings -- using built-in defaults.")
-    settings = dict(SETTING_DEFAULTS)
-    settings["newwifidetected"] = False
-
-# Unpack explicitly -- no hidden globals
-autoname        = settings["autoname"]
-manName         = settings["name"]
-manTimezone     = settings["timezone"]
-autoTime        = settings["autoSystemTime"]
-manTime         = settings["manualTime"]
-bat80           = settings["bat_80perVolts"]
-bat20           = settings["bat_20perVolts"]
-bat_Wh          = settings["bat_Wh"]
-bat_voltage     = settings["bat_voltage"]
-onlyflash       = settings["onlyflash"]
-newwifidetected = settings["newwifidetected"]
-runtime         = settings["runtime"]
-log_info(f"Loaded settings: {settings}")
-
-
-if manTimezone.startswith("right/"):
-    log_warn("Timezone uses 'right/' prefix which includes leap seconds and will cause scheduling errors. Use a standard timezone name instead.")
-
-# Change the timezone in controls
-#set_timezone(controlsFpath, manTimezone)
-atomic_update_kv(os.path.join(CONTROL_ROOT, "timezone.txt"), "timezone", manTimezone)
-
-# Todo - make control values use backup control values in emergency they got corrupted
-#thecontrol_values = get_control_values(controlsFpath)
-
-
-# Check the timezone
-
-log_info(f"Timezone set to: {manTimezone} -- running TimezoneUpdater...")
-run_helper("/home/pi/Desktop/Mothbox/TimezoneUpdater.py", "TimezoneUpdater error")
-
-# See if we should manually set the time
-# Todo: fix the time setting algorithm
-# Set the time manually!
-if(autoTime=="false"):
-    log_info("Time mode: MANUAL -- setting system clock from CSV value.")
-    subprocess.run(["timedatectl", "set-ntp", "false"], check=True)
-    subprocess.run([
-    "python3",
-    "/home/pi/Desktop/Mothbox/SetTimeandDate.py",
-    manTime
-    ], check=True)
-    update_csv_setting(usersettingsFpath, "autoSystemTime", "True")
-else:
-    log_info("Time mode: AUTO (NTP)")
-    subprocess.run(["timedatectl", "set-ntp", "true"], check=True)
-    os.system("sudo hwclock -w")
-
-#Reset python's cached version of the time
-time.tzset()
-
-now = datetime.datetime.now()
-formatted_time = now.strftime("%Y-%m-%d %H:%M:%S")  # Adjust the format as needed
-
-log_ok(f"Confirmed time: {formatted_time}   (RPi model {rpiModel})")
-
-
-log_section("STARTUP -- Identity")
-log_info(f"Auto-name enabled: {autoname}")
-# Add option for people to manually set a name, but default to autoname made by pi5 serial number 
-if(autoname=="true"):
-    filename = "/home/pi/Desktop/Mothbox/wordlist.csv"  # Replace with your actual filename
-    data = read_csv_into_lists(filename)
-
-    # Access data by category (column name)
-    animals = data["Animal2"]
-    adjectives = data["Adjectives"]
-    colors = data["Colors"]
-    verbs = data["Verbs"]
-    animales = data["Animales"]
-    # print(animales)
-    adjectivos = data["Adjectivos"]
-    # print(adjectivos)
-    verbos = data["Verbos"]
-    # print(verbos)
-    colores = data["Colores"]
-    # print(colores)
-    sustantivos = data["Sustantivos"]
-    # print(sustantivos)
-
-    # SetRaspberrypiName
-    serial_number = get_serial_number()
-    # 0 is english 1 is spanish 2 is either spanish or enlgish 3 is spanglish
-    unique_name = generate_unique_name(serial_number, 3)
-    log_ok(f"Device name (auto): {unique_name}")
-
-    # Change it in controls
-    #set_computerName("/boot/firmware/mothbox_custom/system/controls.txt", unique_name)
-    atomic_update_kv(os.path.join(CONTROL_ROOT, "name.txt"), "name", unique_name)
-else:
-  computerName=manName
-  atomic_update_kv(os.path.join(CONTROL_ROOT, "name.txt"), "name", manName)  # <- add this
-  log_ok(f"Device name (manual): {computerName}")
-  
-# ---- End figure out name -----
-
-
-
-
-# -----Set MODE: CHECK THE PHYSICAL SWITCH on the GPIO PINS--------------------
-# -----CHECK THE PHYSICAL SWITCH on the GPIO PINS--------------------
-
-'''
-There are several possible modes that a Mothbox can be in
-Off: sw-Active=0 sw-Debug=0- Mothbox will turn off as soon as it can anytime it wakes (useful for charging)
-
-Active: sw-Active=1 -  it is currently running a session. Automatic routines go. Wifi stops after 5 mins to save energy.
-Standby: sw-Active=1 (but not time for session) - the mothbox pi is shut down, but during the next scheduled session it will become active
-
-Debug: sw-Debug=1 + sw-Active=1 ------------------ When the mothbox has power, it will wake up and not shut down until manually turned off. Automatic Cron routines will not run. Lights are default off. Wifi stays on.
-Party: sw-Debug=1 + sw-Active=1 + sw-C1=1 ----- subset of debug mode, but it runs a routine to just cycle all the lights
-*TODO ActiveQRProgram:sw-Debug=1+ sw-Active=1+sw-U1=1   -  the schedule gets set by using the camera to read a QR code - will need to turn debug off after
-
-
-*TODO HI Power: sw-ACtive=1 + sw-HI=1  - like ACTIVE but Assumption is connected not to battery, but unlimited power supply. Wifi stays on, attempts to upload photos to internet servers automatically.
-
-
-'''
-mode = "ACTIVE"
-
-# Update hardware switch snapshot
-run_script("/home/pi/Desktop/Mothbox/GetConfigSwitches.py", show_output=True)
-
-# Read switches snapshot
-switch_path = os.path.join(CONTROL_ROOT, "switches.txt")
-switch_vals = get_control_values(switch_path)
-
-sActive = int(switch_vals.get("Active", 1))
-sDebug  = int(switch_vals.get("Debug", 0))
-sC1     = int(switch_vals.get("C1", 0))
-sU1     = int(switch_vals.get("U1", 0))
-sHI     = int(switch_vals.get("HI", 0))
-
-
-
-log_info(f"Switches -- Active:{sActive}  Debug:{sDebug}  C1:{sC1}  U1:{sU1}  HI:{sHI}")
-
-# Initialize scheduling variables early so shutdown functions can safely reference them
-# even if called before the scheduling block is reached
-use_switch_schedule = (sU1 == 1)
-switch_schedule = {}
-source_type = "physical switches" if use_switch_schedule else "CSV settings"
-log_info(f"Schedule source: {source_type}")
-
-
-
-# Clear any transient early shutdown reason or abort counters on fresh boot
-for temp_f in ("early_shutdown_reason.txt", "consecutive_aborted_captures.txt"):
-    fp = os.path.join(CONTROL_ROOT, temp_f)
-    if os.path.exists(fp):
-        try: os.remove(fp)
-        except Exception: pass
-
-# Read UTC offset from new control layout
-utc_off = float(read_control("utc", 0))
-
-
-
-# ~~~~~~~~~~~~ Figuring out Scheduling Details ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# ~~~~ Pi 5 specific things to change cron-like commands to the next UTC target
-
-
-log_section("CONFIGURATION -- Scheduling")
-
-switch_schedule = {}
-if use_switch_schedule:
-    log_info("Schedule source: physical switches")
-    switch_schedule = read_switch_schedule(switch_vals)
-    minute  = switch_schedule["minute"]
-    hour    = switch_schedule["hour"]
-    weekday = switch_schedule["weekday"]
-    runtime = switch_schedule["runtime"]
-else:
-    log_info("Schedule source: CSV settings")
-    minute  = settings.get("minute",  "0")
-    hour    = settings.get("hour",    "20")
-    weekday = settings.get("weekday", "1,2,3,4,5,6,7")
-    runtime = int(settings.get("runtime", 58))
-
-photo_interval = int(settings.get("photo_interval", 1))
-atomic_update_kv(os.path.join(CONTROL_ROOT, "photo_interval.txt"), "photo_interval", photo_interval)
-settings.pop("photo_interval", None)  # don't let it pollute cron builder
-capture_mode = settings.get("capture_mode", "timelapse").strip().lower()
-if capture_mode not in ("timelapse", "burst"):
-    capture_mode = "timelapse"
-atomic_update_kv(os.path.join(CONTROL_ROOT, "capture_mode.txt"), "capture_mode", capture_mode)
-burst_count = int(settings.get("burst_count", 8))
-atomic_update_kv(os.path.join(CONTROL_ROOT, "burst_count.txt"), "burst_count", burst_count)
-burst_interval_s = float(settings.get("burst_interval_s", 6.0))
-atomic_update_kv(os.path.join(CONTROL_ROOT, "burst_interval_s.txt"), "burst_interval_s", burst_interval_s)
-log_info(f"Capture mode: {capture_mode} (burst_count={burst_count}, burst_interval={burst_interval_s}s)")
-settings.pop("capture_mode", None)
-settings.pop("burst_count", None)
-settings.pop("burst_interval_s", None)
-log_info(f"Backup interval: {settings.get('backup_interval', 5)} min (read live by Backup_Files.py)")
-settings.pop("backup_interval", None)
-log_info(f"Hardware override in settings: {settings.get('hardware', 'auto')}")
-settings.pop("hardware", None)
-
-set_timings(minute, hour, weekday, runtime)
-settings.pop("runtime", None)  # safe delete, no KeyError
-
-
-if rpiModel == 4:
-    log_warn("Pi 4 not supported -- device cannot wake itself.")
-
-if rpiModel == 5:
-    # don't need to modify the hours to UTC like we do for pijuice
-    # Build Cron expression
-    # The cron expression is made of five fields. Each field can have the following values.
-    # minute (0-59) |	hour (0 - 23)	|day of the month (1 - 31)	| month (1 - 12)	| day of the week (0 - 6)
-
-    # Loop through each key-value pair in the dictionary
-    for key, value in settings.items():
-        # Check if the value is a string and contains semicolons
-        if isinstance(value, str) and ";" in value:
-            # Replace semicolons with commas
-            settings[key] = value.replace(";", ",")
-    cron_source = switch_schedule if use_switch_schedule else settings
-    cron_expression = build_cron_expression(cron_source)
+    # --------------------------------------------------------------------
+    # Clean Flight & Crash Recovery Guard
+    # --------------------------------------------------------------------
+    shutdown_state_file = os.path.join(CONTROL_ROOT, "shutdown_state.txt")
+    last_state = read_control("shutdown_state", "clean")
+    if last_state != "clean":
+        log_warn("⚠️  Previous shutdown was NOT clean (unexpected crash, brownout, or power cut).")
     
-    log_info(f"Cron expression : {cron_expression}")
-    log_info(f"UTC offset      : {utc_off}")
+        # 1. Break brownout death loop if battery is depleted
+        if mothbox_hw is not None:
+            try:
+                pwr = mothbox_hw.read_power()
+                v_rec = float(pwr.get("voltage_v", -1))
+                if 0 < v_rec < 10.8:
+                    log_warn(f"[CRASH_RECOVERY] Battery voltage is critically low ({v_rec:.2f}V < 10.8V). "
+                             f"Aborting active session to prevent PMIC brownout crash loop.")
+                    atomic_update_kv(os.path.join(CONTROL_ROOT, "mode.txt"), "mode", "STANDBY")
+                    run_script("/home/pi/Desktop/Mothbox/Diagnostics.py", "Standby_Check", show_output=True)
+                    run_shutdown_pi5_FAST()
+                    sys.exit(0)
+            except Exception as e:
+                log_warn(f"[CRASH_RECOVERY] Battery voltage pre-check error ({e}) -- proceeding.")
 
-    next_epoch_time = calculate_next_event(cron_expression, utc_off)
+        # 2. Heal read-only filesystem mounts if Linux protected corrupted drives
+        try:
+            if os.path.exists("/proc/mounts"):
+                with open("/proc/mounts", "r") as mf:
+                    for line in mf:
+                        parts = line.strip().split()
+                        if len(parts) >= 4 and parts[1].startswith("/media/"):
+                            opts = parts[3].split(",")
+                            if "ro" in opts:
+                                dev_node = parts[0]
+                                mp_path = parts[1]
+                                log_warn(f"[CRASH_RECOVERY] {mp_path} mounted READ-ONLY after crash. Attempting remount rw...")
+                                subprocess.run(["sudo", "mount", "-o", "remount,rw", mp_path], check=False, timeout=10)
+        except Exception as e:
+            log_warn(f"[CRASH_RECOVERY] Mount check error ({e}).")
 
-    # Clear existing wakeup alarm (assuming sudo access)
-    clear_wakeup_alarm()
+    # Arm crash detection for this boot: if power cuts unexpectedly, next boot detects it
+    atomic_update_kv(shutdown_state_file, "shutdown_state", "dirty")
 
-set_wakeup_alarm(next_epoch_time)
-log_ok(f"Next wakeup alarm set for: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(next_epoch_time))}")
+    # Safe defaults -- will be properly set after switch reading
+    use_switch_schedule = False
+    switch_schedule = {}
 
-#-- End Scheduling complete, now set all the other settings
-
-
-
-
-log_section("CONFIGURATION -- Mode")
-
-if sActive == 0:
-    mode = "OFF"
-    log_info("Active switch is OFF -> mode: OFF")
-
-if mode == "OFF":
-    atomic_update_kv(os.path.join(CONTROL_ROOT, "mode.txt"), "mode", mode)
-    run_shutdown_pi5_FAST()
-    quit()
-
-# If Active Switch is OFF, it should never make it past here
-
-
-#### Check ACtive Modes
-# Now check for subsets of Active Mode, like Party Mode or Debug
-# TODO
-
-if(sDebug==1):
-    None
-    mode="DEBUG"
-
-if(sDebug==1 and sC1==1):
-    None
-    mode="PARTY"
-
-#Temporarily disabling QR prog mode
-# ~ if(sDebug==1 and sU1==1):
-    # ~ None
-    # ~ mode="QR_PROG"
-
-
-if(sDebug==0 and sHI==1):
-    None
-    mode="HI_POW"
-
-log_ok(f"Mode determined: {mode}")
-# Write mode to controls.txt
-#set_Mode(controlsFpath, mode)
-atomic_update_kv(os.path.join(CONTROL_ROOT, "mode.txt"), "mode", mode)
+    usersettingsFpath="/boot/firmware/mothbox_custom/mothbox_settings.csv"
 
 
 
-# TODO - Implement these modes I haven't coded for yet
-# for now, temp solution
 
-if mode=="HI_POW" or mode=="QR_PROG":
-    mode="ACTIVE"
-    atomic_update_kv(os.path.join(CONTROL_ROOT, "mode.txt"), "mode", mode)
-    #set_Mode(controlsFpath, mode)
-    log_info(f"Mode normalised to: {mode}")
+    log_section("STARTUP -- Configuration")
 
-# ----- Mode kills desktop mode for everything but DEBUG and PARTY   
-configure_display_for_mode(mode)
+    settings = load_settings(usersettingsFpath)
+    if settings is None:
+        log_warn("CRITICAL: Could not load settings -- using built-in defaults.")
+        settings = dict(SETTING_DEFAULTS)
+        settings["newwifidetected"] = False
 
-configure_wifi_for_mode(mode)
+    # Unpack explicitly -- no hidden globals
+    autoname        = settings["autoname"]
+    manName         = settings["name"]
+    manTimezone     = settings["timezone"]
+    autoTime        = settings["autoSystemTime"]
+    manTime         = settings["manualTime"]
+    bat80           = settings["bat_80perVolts"]
+    bat20           = settings["bat_20perVolts"]
+    bat_Wh          = settings["bat_Wh"]
+    bat_voltage     = settings["bat_voltage"]
+    onlyflash       = settings["onlyflash"]
+    newwifidetected = settings["newwifidetected"]
+    runtime         = settings["runtime"]
+    log_info(f"Loaded settings: {settings}")
 
-log_section("CONFIGURATION -- WiFi Provisioning")
-handle_wifi_provisioning(settings.get("ssid", None), settings.get("wifipass", None), mode)
+
+    if manTimezone.startswith("right/"):
+        log_warn("Timezone uses 'right/' prefix which includes leap seconds and will cause scheduling errors. Use a standard timezone name instead.")
+
+    # Change the timezone in controls
+    #set_timezone(controlsFpath, manTimezone)
+    atomic_update_kv(os.path.join(CONTROL_ROOT, "timezone.txt"), "timezone", manTimezone)
+
+    # Todo - make control values use backup control values in emergency they got corrupted
+    #thecontrol_values = get_control_values(controlsFpath)
 
 
-####---- END MODE LOGIC----#
+    # Check the timezone
+
+    log_info(f"Timezone set to: {manTimezone} -- running TimezoneUpdater...")
+    run_helper("/home/pi/Desktop/Mothbox/TimezoneUpdater.py", "TimezoneUpdater error")
+
+    # See if we should manually set the time
+    # Todo: fix the time setting algorithm
+    # Set the time manually!
+    if(autoTime=="false"):
+        log_info("Time mode: MANUAL -- setting system clock from CSV value.")
+        subprocess.run(["timedatectl", "set-ntp", "false"], check=True)
+        subprocess.run([
+        "python3",
+        "/home/pi/Desktop/Mothbox/SetTimeandDate.py",
+        manTime
+        ], check=True)
+        update_csv_setting(usersettingsFpath, "autoSystemTime", "True")
+    else:
+        log_info("Time mode: AUTO (NTP)")
+        subprocess.run(["timedatectl", "set-ntp", "true"], check=True)
+        os.system("sudo hwclock -w")
+
+    #Reset python's cached version of the time
+    time.tzset()
+
+    now = datetime.datetime.now()
+    formatted_time = now.strftime("%Y-%m-%d %H:%M:%S")  # Adjust the format as needed
+
+    log_ok(f"Confirmed time: {formatted_time}   (RPi model {rpiModel})")
+
+
+    log_section("STARTUP -- Identity")
+    log_info(f"Auto-name enabled: {autoname}")
+    # Add option for people to manually set a name, but default to autoname made by pi5 serial number 
+    if(autoname=="true"):
+        filename = "/home/pi/Desktop/Mothbox/wordlist.csv"  # Replace with your actual filename
+        data = read_csv_into_lists(filename)
+
+        # Access data by category (column name)
+        animals = data["Animal2"]
+        adjectives = data["Adjectives"]
+        colors = data["Colors"]
+        verbs = data["Verbs"]
+        animales = data["Animales"]
+        # print(animales)
+        adjectivos = data["Adjectivos"]
+        # print(adjectivos)
+        verbos = data["Verbos"]
+        # print(verbos)
+        colores = data["Colores"]
+        # print(colores)
+        sustantivos = data["Sustantivos"]
+        # print(sustantivos)
+
+        # SetRaspberrypiName
+        serial_number = get_serial_number()
+        # 0 is english 1 is spanish 2 is either spanish or enlgish 3 is spanglish
+        unique_name = generate_unique_name(serial_number, 3)
+        log_ok(f"Device name (auto): {unique_name}")
+
+        # Change it in controls
+        #set_computerName("/boot/firmware/mothbox_custom/system/controls.txt", unique_name)
+        atomic_update_kv(os.path.join(CONTROL_ROOT, "name.txt"), "name", unique_name)
+    else:
+      computerName=manName
+      atomic_update_kv(os.path.join(CONTROL_ROOT, "name.txt"), "name", manName)  # <- add this
+      log_ok(f"Device name (manual): {computerName}")
+  
+    # ---- End figure out name -----
 
 
 
-#------ Camera Check -----------
-# Run for every mode except OFF (already quit() before reaching here).
-# The result is stored in camera_ok so the standby blink block below can
-# use it to choose between a normal 2-blink and a warning 8-blink.
 
-log_section("CONFIGURATION -- Camera")
-camera_ok = check_camera()
-# Record it where UpdateDisplay.py can see it, so a disconnected camera shows
-# as a banner on the e-paper instead of only as a blink pattern nobody is
-# there to count. TakePhoto.py rewrites this too if the camera dies mid-session.
-atomic_update_kv(os.path.join(CONTROL_ROOT, "camera.txt"), "camera", "ok" if camera_ok else "missing")
-if not camera_ok:
-    # Warn the human NOW, on every path, then carry on exactly as normal.
-    # The check is advisory only: nothing downstream is gated on it, so if this
-    # was a false positive the box still takes its photos. Better a needless
-    # warning than a silent night of blank frames.
-    log_warn("Camera not detected -- display banner set. "
-             "Photos will still be attempted normally in case this is a false alarm.")
-    # OFF means OFF: an OFF box must never light anything. It already exits
-    # long before this point, but say so explicitly so that stays true if the
-    # camera check is ever moved earlier in the boot sequence.
+    # -----Set MODE: CHECK THE PHYSICAL SWITCH on the GPIO PINS--------------------
+    # -----CHECK THE PHYSICAL SWITCH on the GPIO PINS--------------------
+
+    '''
+    There are several possible modes that a Mothbox can be in
+    Off: sw-Active=0 sw-Debug=0- Mothbox will turn off as soon as it can anytime it wakes (useful for charging)
+
+    Active: sw-Active=1 -  it is currently running a session. Automatic routines go. Wifi stops after 5 mins to save energy.
+    Standby: sw-Active=1 (but not time for session) - the mothbox pi is shut down, but during the next scheduled session it will become active
+
+    Debug: sw-Debug=1 + sw-Active=1 ------------------ When the mothbox has power, it will wake up and not shut down until manually turned off. Automatic Cron routines will not run. Lights are default off. Wifi stays on.
+    Party: sw-Debug=1 + sw-Active=1 + sw-C1=1 ----- subset of debug mode, but it runs a routine to just cycle all the lights
+    *TODO ActiveQRProgram:sw-Debug=1+ sw-Active=1+sw-U1=1   -  the schedule gets set by using the camera to read a QR code - will need to turn debug off after
+
+
+    *TODO HI Power: sw-ACtive=1 + sw-HI=1  - like ACTIVE but Assumption is connected not to battery, but unlimited power supply. Wifi stays on, attempts to upload photos to internet servers automatically.
+
+
+    '''
+    mode = "ACTIVE"
+
+    # Update hardware switch snapshot
+    run_script("/home/pi/Desktop/Mothbox/GetConfigSwitches.py", show_output=True)
+
+    # Read switches snapshot
+    switch_path = os.path.join(CONTROL_ROOT, "switches.txt")
+    switch_vals = get_control_values(switch_path)
+
+    sActive = int(switch_vals.get("Active", 1))
+    sDebug  = int(switch_vals.get("Debug", 0))
+    sC1     = int(switch_vals.get("C1", 0))
+    sU1     = int(switch_vals.get("U1", 0))
+    sHI     = int(switch_vals.get("HI", 0))
+
+
+
+    log_info(f"Switches -- Active:{sActive}  Debug:{sDebug}  C1:{sC1}  U1:{sU1}  HI:{sHI}")
+
+    # Initialize scheduling variables early so shutdown functions can safely reference them
+    # even if called before the scheduling block is reached
+    use_switch_schedule = (sU1 == 1)
+    switch_schedule = {}
+    source_type = "physical switches" if use_switch_schedule else "CSV settings"
+    log_info(f"Schedule source: {source_type}")
+
+
+
+    # Clear any transient early shutdown reason or abort counters on fresh boot
+    for temp_f in ("early_shutdown_reason.txt", "consecutive_aborted_captures.txt"):
+        fp = os.path.join(CONTROL_ROOT, temp_f)
+        if os.path.exists(fp):
+            try: os.remove(fp)
+            except Exception: pass
+
+    # Read UTC offset from new control layout
+    utc_off = float(read_control("utc", 0))
+
+
+
+    # ~~~~~~~~~~~~ Figuring out Scheduling Details ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    # ~~~~ Pi 5 specific things to change cron-like commands to the next UTC target
+
+
+    log_section("CONFIGURATION -- Scheduling")
+
+    switch_schedule = {}
+    if use_switch_schedule:
+        log_info("Schedule source: physical switches")
+        switch_schedule = read_switch_schedule(switch_vals)
+        minute  = switch_schedule["minute"]
+        hour    = switch_schedule["hour"]
+        weekday = switch_schedule["weekday"]
+        runtime = switch_schedule["runtime"]
+    else:
+        log_info("Schedule source: CSV settings")
+        minute  = settings.get("minute",  "0")
+        hour    = settings.get("hour",    "20")
+        weekday = settings.get("weekday", "1,2,3,4,5,6,7")
+        runtime = int(settings.get("runtime", 58))
+
+    photo_interval = int(settings.get("photo_interval", 1))
+    atomic_update_kv(os.path.join(CONTROL_ROOT, "photo_interval.txt"), "photo_interval", photo_interval)
+    settings.pop("photo_interval", None)  # don't let it pollute cron builder
+    capture_mode = settings.get("capture_mode", "timelapse").strip().lower()
+    if capture_mode not in ("timelapse", "burst"):
+        capture_mode = "timelapse"
+    atomic_update_kv(os.path.join(CONTROL_ROOT, "capture_mode.txt"), "capture_mode", capture_mode)
+    burst_count = int(settings.get("burst_count", 8))
+    atomic_update_kv(os.path.join(CONTROL_ROOT, "burst_count.txt"), "burst_count", burst_count)
+    burst_interval_s = float(settings.get("burst_interval_s", 6.0))
+    atomic_update_kv(os.path.join(CONTROL_ROOT, "burst_interval_s.txt"), "burst_interval_s", burst_interval_s)
+    log_info(f"Capture mode: {capture_mode} (burst_count={burst_count}, burst_interval={burst_interval_s}s)")
+    settings.pop("capture_mode", None)
+    settings.pop("burst_count", None)
+    settings.pop("burst_interval_s", None)
+    log_info(f"Backup interval: {settings.get('backup_interval', 5)} min (read live by Backup_Files.py)")
+    settings.pop("backup_interval", None)
+    log_info(f"Hardware override in settings: {settings.get('hardware', 'auto')}")
+    settings.pop("hardware", None)
+
+    set_timings(minute, hour, weekday, runtime)
+    settings.pop("runtime", None)  # safe delete, no KeyError
+
+
+    if rpiModel == 4:
+        log_warn("Pi 4 not supported -- device cannot wake itself.")
+
+    if rpiModel == 5:
+        # don't need to modify the hours to UTC like we do for pijuice
+        # Build Cron expression
+        # The cron expression is made of five fields. Each field can have the following values.
+        # minute (0-59) |	hour (0 - 23)	|day of the month (1 - 31)	| month (1 - 12)	| day of the week (0 - 6)
+
+        # Loop through each key-value pair in the dictionary
+        for key, value in settings.items():
+            # Check if the value is a string and contains semicolons
+            if isinstance(value, str) and ";" in value:
+                # Replace semicolons with commas
+                settings[key] = value.replace(";", ",")
+        cron_source = switch_schedule if use_switch_schedule else settings
+        cron_expression = build_cron_expression(cron_source)
+    
+        log_info(f"Cron expression : {cron_expression}")
+        log_info(f"UTC offset      : {utc_off}")
+
+        next_epoch_time = calculate_next_event(cron_expression, utc_off)
+
+        # Clear existing wakeup alarm (assuming sudo access)
+        clear_wakeup_alarm()
+
+    set_wakeup_alarm(next_epoch_time)
+    log_ok(f"Next wakeup alarm set for: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(next_epoch_time))}")
+
+    #-- End Scheduling complete, now set all the other settings
+
+
+
+
+    log_section("CONFIGURATION -- Mode")
+
+    if sActive == 0:
+        mode = "OFF"
+        log_info("Active switch is OFF -> mode: OFF")
+
     if mode == "OFF":
-        log_info("Mode is OFF -- skipping the 8-blink warning (nothing may light up in OFF).")
-    else:
-        log_warn("Blinking the 8x camera warning.")
-        run_cmd("python3 /home/pi/Desktop/Mothbox/scripts/blink_standby.py 8 0.5")
-#------ End Camera Check -------
-
-# ------ Media Health Check -------
-log_section("LAUNCH -- Media Health Check")
-media_issue = check_media_health()
-if media_issue:
-    log_warn(f"[Scheduler] Media check warning: {media_issue}")
-    if camera_ok and mode != "OFF":
-        # Blink distinct 5-blink warning so operator on deployment knows media needs attention
-        run_cmd("python3 /home/pi/Desktop/Mothbox/scripts/blink_standby.py 5 0.2")
-else:
-    log_ok("[Scheduler] Media health check OK: USB and SD verified.")
-# ------ End Media Health Check ---
-
-log_section("LAUNCH -- Schedule Check")
-
-if mode == "ACTIVE":
-    schedule_to_check = switch_schedule if use_switch_schedule else settings
-    if is_now_in_schedule(schedule_to_check, runtime):
-        now_is_in_schedule = 1
-        log_ok("Within schedule window -- staying awake.")
-    else:
-        now_is_in_schedule = 0
-        log_info("Outside schedule window -> entering STANDBY.")
-        mode = "STANDBY"
         atomic_update_kv(os.path.join(CONTROL_ROOT, "mode.txt"), "mode", mode)
-        # Blink FIRST. Someone is usually standing there waiting to know the
-        # box is healthy, and the diagnostics below take several seconds they
-        # would otherwise spend staring at a dark box. The log still gets
-        # everything -- it just gets it after the human has their answer.
-        # Only the "all good" blink here -- a missing camera already blinked its
-        # 8x warning right after the check, on whichever path we took.
-        if camera_ok:
-            run_cmd("python3 /home/pi/Desktop/Mothbox/scripts/blink_standby.py 2 0.125")
-
-        log_section("STANDBY -- Sensors & Diagnostics")
-        run_script("/home/pi/Desktop/Mothbox/Diagnostics.py", "Standby_Check", show_output=True)
         run_shutdown_pi5_FAST()
         quit()
 
-log_section("CONFIGURATION -- Sensors & Diagnostics")
-run_script("/home/pi/Desktop/Mothbox/Diagnostics.py", "Startup_Check", show_output=True)
+    # If Active Switch is OFF, it should never make it past here
 
 
-log_section("LAUNCH -- GPS")
-if not settings.get("enable_gps", False):
-    log_info("GPS disabled in settings (enable_gps=False) -- skipping.")
-else:
-    _gps_devs = gps_devices_attached()
-    if _gps_devs == 0:
-        log_info("gpsd has no device attached -- skipping the GPS read (saves ~10s).")
-    elif _gps_devs < 0:
-        log_info("gpsd not reachable -- skipping the GPS read.")
+    #### Check ACtive Modes
+    # Now check for subsets of Active Mode, like Party Mode or Debug
+    # TODO
+
+    if(sDebug==1):
+        None
+        mode="DEBUG"
+
+    if(sDebug==1 and sC1==1):
+        None
+        mode="PARTY"
+
+    #Temporarily disabling QR prog mode
+    # ~ if(sDebug==1 and sU1==1):
+        # ~ None
+        # ~ mode="QR_PROG"
+
+
+    if(sDebug==0 and sHI==1):
+        None
+        mode="HI_POW"
+
+    log_ok(f"Mode determined: {mode}")
+    # Write mode to controls.txt
+    #set_Mode(controlsFpath, mode)
+    atomic_update_kv(os.path.join(CONTROL_ROOT, "mode.txt"), "mode", mode)
+
+
+
+    # TODO - Implement these modes I haven't coded for yet
+    # for now, temp solution
+
+    if mode=="HI_POW" or mode=="QR_PROG":
+        mode="ACTIVE"
+        atomic_update_kv(os.path.join(CONTROL_ROOT, "mode.txt"), "mode", mode)
+        #set_Mode(controlsFpath, mode)
+        log_info(f"Mode normalised to: {mode}")
+
+    # ----- Mode kills desktop mode for everything but DEBUG and PARTY   
+    configure_display_for_mode(mode)
+
+    configure_wifi_for_mode(mode)
+
+    log_section("CONFIGURATION -- WiFi Provisioning")
+    handle_wifi_provisioning(settings.get("ssid", None), settings.get("wifipass", None), mode)
+
+
+    ####---- END MODE LOGIC----#
+
+
+
+    #------ Camera Check -----------
+    # Run for every mode except OFF (already quit() before reaching here).
+    # The result is stored in camera_ok so the standby blink block below can
+    # use it to choose between a normal 2-blink and a warning 8-blink.
+
+    log_section("CONFIGURATION -- Camera")
+    camera_ok = check_camera()
+    # Record it where UpdateDisplay.py can see it, so a disconnected camera shows
+    # as a banner on the e-paper instead of only as a blink pattern nobody is
+    # there to count. TakePhoto.py rewrites this too if the camera dies mid-session.
+    atomic_update_kv(os.path.join(CONTROL_ROOT, "camera.txt"), "camera", "ok" if camera_ok else "missing")
+    if not camera_ok:
+        # Warn the human NOW, on every path, then carry on exactly as normal.
+        # The check is advisory only: nothing downstream is gated on it, so if this
+        # was a false positive the box still takes its photos. Better a needless
+        # warning than a silent night of blank frames.
+        log_warn("Camera not detected -- display banner set. "
+                 "Photos will still be attempted normally in case this is a false alarm.")
+        # OFF means OFF: an OFF box must never light anything. It already exits
+        # long before this point, but say so explicitly so that stays true if the
+        # camera check is ever moved earlier in the boot sequence.
+        if mode == "OFF":
+            log_info("Mode is OFF -- skipping the 8-blink warning (nothing may light up in OFF).")
+        else:
+            log_warn("Blinking the 8x camera warning.")
+            run_cmd("python3 /home/pi/Desktop/Mothbox/scripts/blink_standby.py 8 0.5")
+    #------ End Camera Check -------
+
+    # ------ Media Health Check -------
+    log_section("LAUNCH -- Media Health Check")
+    media_issue = check_media_health()
+    if media_issue:
+        log_warn(f"[Scheduler] Media check warning: {media_issue}")
+        if camera_ok and mode != "OFF":
+            # Blink distinct 5-blink warning so operator on deployment knows media needs attention
+            run_cmd("python3 /home/pi/Desktop/Mothbox/scripts/blink_standby.py 5 0.2")
     else:
-        log_info(f"gpsd reports {_gps_devs} device(s) -- reading GPS, up to 10 seconds...")
-        run_helper("/home/pi/Desktop/Mothbox/GPS.py", "GPS error")
+        log_ok("[Scheduler] Media health check OK: USB and SD verified.")
+    # ------ End Media Health Check ---
 
-# Toggle a mode where the flash lights are always on
-#enable_onlyflash()
+    log_section("LAUNCH -- Schedule Check")
+
+    if mode == "ACTIVE":
+        schedule_to_check = switch_schedule if use_switch_schedule else settings
+        if is_now_in_schedule(schedule_to_check, runtime):
+            now_is_in_schedule = 1
+            log_ok("Within schedule window -- staying awake.")
+        else:
+            now_is_in_schedule = 0
+            log_info("Outside schedule window -> entering STANDBY.")
+            mode = "STANDBY"
+            atomic_update_kv(os.path.join(CONTROL_ROOT, "mode.txt"), "mode", mode)
+            # Blink FIRST. Someone is usually standing there waiting to know the
+            # box is healthy, and the diagnostics below take several seconds they
+            # would otherwise spend staring at a dark box. The log still gets
+            # everything -- it just gets it after the human has their answer.
+            # Only the "all good" blink here -- a missing camera already blinked its
+            # 8x warning right after the check, on whichever path we took.
+            if camera_ok:
+                run_cmd("python3 /home/pi/Desktop/Mothbox/scripts/blink_standby.py 2 0.125")
+
+            log_section("STANDBY -- Sensors & Diagnostics")
+            run_script("/home/pi/Desktop/Mothbox/Diagnostics.py", "Standby_Check", show_output=True)
+            run_shutdown_pi5_FAST()
+            quit()
+
+    log_section("CONFIGURATION -- Sensors & Diagnostics")
+    run_script("/home/pi/Desktop/Mothbox/Diagnostics.py", "Startup_Check", show_output=True)
+
+
+    log_section("LAUNCH -- GPS")
+    if not settings.get("enable_gps", False):
+        log_info("GPS disabled in settings (enable_gps=False) -- skipping.")
+    else:
+        _gps_devs = gps_devices_attached()
+        if _gps_devs == 0:
+            log_info("gpsd has no device attached -- skipping the GPS read (saves ~10s).")
+        elif _gps_devs < 0:
+            log_info("gpsd not reachable -- skipping the GPS read.")
+        else:
+            log_info(f"gpsd reports {_gps_devs} device(s) -- reading GPS, up to 10 seconds...")
+            run_helper("/home/pi/Desktop/Mothbox/GPS.py", "GPS error")
+
+    # Toggle a mode where the flash lights are always on
+    #enable_onlyflash()
 
 
 
-# ~~~~~~~ Display ~~~~~~~~~~~~~~~~~~~~
+    # ~~~~~~~ Display ~~~~~~~~~~~~~~~~~~~~
 
-log_section("LAUNCH -- Display")
-if should_update_display("boot", settings, mode):
-    log_info("Updating ePaper display (if available)...")
-    if mothbox_hw is not None:
+    log_section("LAUNCH -- Display")
+    if should_update_display("boot", settings, mode):
+        log_info("Updating ePaper display (if available)...")
+        if mothbox_hw is not None:
+            try:
+                mothbox_hw.attract_off()
+                mothbox_hw.rail_12v(False)
+            except Exception:
+                pass
+        run_helper("/home/pi/Desktop/Mothbox/UpdateDisplay.py", "Display error")
+    else:
+        log_info(f"Skipping ePaper display update (epaper_mode={get_epaper_mode(settings)} in mode={mode}).")
+
+
+    log_section("LAUNCH -- Final Mode")
+
+    # NOTE: no "OFF" branch here. OFF is handled much earlier, in CONFIGURATION --
+    # Mode, which shuts down and quit()s before this point, so a branch here could
+    # never run.
+    if mode == "DEBUG":
+        log_ok("Mode is DEBUG -- wifi on, cron off, staying alive.")
+        # Define the path to your script (replace 'path/to/script' with the actual path)
+        debug_script_path = "/home/pi/Desktop/Mothbox/DebugMode.py"
+        run_mode_script(debug_script_path)
+        stopcron()
+    elif mode == "PARTY":
+        log_ok("Mode is PARTY -- lights cycling, wifi on.")
+        # Define the path to your script (replace 'path/to/script' with the actual path)
+        debug_script_path = "/home/pi/Desktop/Mothbox/DebugMode.py"
+        run_mode_script(debug_script_path)
+
+        party_script_path = "/home/pi/Desktop/Mothbox/Party.py"
+        run_mode_script(party_script_path)
+        stopcron()
+    elif mode == "ACTIVE":
+        log_ok("Mode is ACTIVE -- session running.")
+        # Ensure attractor lights are switched on immediately for the session
+        if mothbox_hw is not None:
+            try:
+                mothbox_hw.attract_on()
+            except Exception as e:
+                log_warn(f"Failed to turn attractor lights on via mothbox_hw: {e}")
+        else:
+            run_helper("/home/pi/Desktop/Mothbox/Attract_On.py", "Attract lights error")
+    else:
+        log_warn(f"Unrecognised mode: {mode}")
+
+
+
+    ###------ Remove the Boot lock ----------#
+    # Allow other scripts to be run by cron can be enabled. Run any time-sensitive sensor scripts before this (e.g. measure light)
+
+    if os.path.exists(BOOT_LOCK):
         try:
-            mothbox_hw.attract_off()
-            mothbox_hw.rail_12v(False)
-        except Exception:
+            os.remove(BOOT_LOCK)
+        except OSError:
             pass
-    run_helper("/home/pi/Desktop/Mothbox/UpdateDisplay.py", "Display error")
-else:
-    log_info(f"Skipping ePaper display update (epaper_mode={get_epaper_mode(settings)} in mode={mode}).")
+
+    ###--------------------------------------###
 
 
-log_section("LAUNCH -- Final Mode")
+    log_section("LAUNCH -- Session Timer")
+    if runtime > 0 and mode not in ("DEBUG", "PARTY"):
+        enable_shutdown()
+        time.sleep(0.05)
 
-# NOTE: no "OFF" branch here. OFF is handled much earlier, in CONFIGURATION --
-# Mode, which shuts down and quit()s before this point, so a branch here could
-# never run.
-if mode == "DEBUG":
-    log_ok("Mode is DEBUG -- wifi on, cron off, staying alive.")
-    # Define the path to your script (replace 'path/to/script' with the actual path)
-    debug_script_path = "/home/pi/Desktop/Mothbox/DebugMode.py"
-    run_mode_script(debug_script_path)
-    stopcron()
-elif mode == "PARTY":
-    log_ok("Mode is PARTY -- lights cycling, wifi on.")
-    # Define the path to your script (replace 'path/to/script' with the actual path)
-    debug_script_path = "/home/pi/Desktop/Mothbox/DebugMode.py"
-    run_mode_script(debug_script_path)
+        # Calculate actual runtime aligned to next scheduled wake slot
+        effective_runtime = runtime
+        if 'next_epoch_time' in locals() and next_epoch_time is not None:
+            seconds_to_next = next_epoch_time - time.time()
+            # If the next scheduled wake is within the normal gap (e.g. within 75 mins),
+            # shut down at least 1 minute before next wake so we don't drift into the next hour
+            if 0 < seconds_to_next <= (runtime + 20) * 60:
+                aligned_mins = max(1.0, (seconds_to_next / 60.0) - 1.0)
+                if aligned_mins < runtime:
+                    log_info(f"Session aligned to next wake boundary: running for {aligned_mins:.1f} min instead of {runtime} min.")
+                    effective_runtime = aligned_mins
 
-    party_script_path = "/home/pi/Desktop/Mothbox/Party.py"
-    run_mode_script(party_script_path)
-    stopcron()
-elif mode == "ACTIVE":
-    log_ok("Mode is ACTIVE -- session running.")
-    # Ensure attractor lights are switched on immediately for the session
-    if mothbox_hw is not None:
-        try:
-            mothbox_hw.attract_on()
-        except Exception as e:
-            log_warn(f"Failed to turn attractor lights on via mothbox_hw: {e}")
+        log_info(f"Session will run for {effective_runtime:.1f} minute(s) then shut down.")
+        schedule_shutdown(effective_runtime)
     else:
-        run_helper("/home/pi/Desktop/Mothbox/Attract_On.py", "Attract lights error")
-else:
-    log_warn(f"Unrecognised mode: {mode}")
-
-
-
-###------ Remove the Boot lock ----------#
-# Allow other scripts to be run by cron can be enabled. Run any time-sensitive sensor scripts before this (e.g. measure light)
-
-if os.path.exists(BOOT_LOCK):
-    try:
-        os.remove(BOOT_LOCK)
-    except OSError:
-        pass
-
-###--------------------------------------###
-
-
-log_section("LAUNCH -- Session Timer")
-if runtime > 0 and mode not in ("DEBUG", "PARTY"):
-    enable_shutdown()
-    time.sleep(0.05)
-
-    # Calculate actual runtime aligned to next scheduled wake slot
-    effective_runtime = runtime
-    if 'next_epoch_time' in locals() and next_epoch_time is not None:
-        seconds_to_next = next_epoch_time - time.time()
-        # If the next scheduled wake is within the normal gap (e.g. within 75 mins),
-        # shut down at least 1 minute before next wake so we don't drift into the next hour
-        if 0 < seconds_to_next <= (runtime + 20) * 60:
-            aligned_mins = max(1.0, (seconds_to_next / 60.0) - 1.0)
-            if aligned_mins < runtime:
-                log_info(f"Session aligned to next wake boundary: running for {aligned_mins:.1f} min instead of {runtime} min.")
-                effective_runtime = aligned_mins
-
-    log_info(f"Session will run for {effective_runtime:.1f} minute(s) then shut down.")
-    schedule_shutdown(effective_runtime)
-else:
-    log_info("No shutdown scheduled -- running indefinitely.")
+        log_info("No shutdown scheduled -- running indefinitely.")
