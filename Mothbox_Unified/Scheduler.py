@@ -2785,9 +2785,9 @@ if __name__ == "__main__":
         if 'next_epoch_time' in locals() and next_epoch_time is not None:
             seconds_to_next = next_epoch_time - time.time()
             # If the next scheduled wake is within the normal gap (e.g. within 75 mins),
-            # shut down at least 1 minute before next wake so we don't drift into the next hour
+            # shut down at least 4 minutes before next wake so we don't collide with the wake alarm
             if 0 < seconds_to_next <= (runtime + 20) * 60:
-                aligned_mins = max(1.0, (seconds_to_next / 60.0) - 1.0)
+                aligned_mins = max(1.0, (seconds_to_next / 60.0) - 4.0)
                 if aligned_mins < runtime:
                     log_info(f"Session aligned to next wake boundary: running for {aligned_mins:.1f} min instead of {runtime} min.")
                     effective_runtime = aligned_mins
