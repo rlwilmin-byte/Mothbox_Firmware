@@ -508,14 +508,10 @@ def attract_on(stagger_s=0.05):
     """
     if is_pro():
         rail_12v(True)
-        if stagger_s > 0:
-            time.sleep(stagger_s)
-            for pin in (PRO["CH3"], PRO["CH2"], PRO["CH1"], PRO["CHEXT"], PRO["CHEXT_PCB_BUG_PIN"]):
-                _out(pin, True)
+        for pin in (PRO["CH1"], PRO["CH2"], PRO["CH3"]):
+            _out(pin, True)
+            if stagger_s > 0:
                 time.sleep(stagger_s)
-        else:
-            _out_many([PRO["CH3"], PRO["CH2"], PRO["CH1"], PRO["CHEXT"],
-                       PRO["CHEXT_PCB_BUG_PIN"]], True)
     else:
         if stagger_s > 0:
             _out(DIY["RELAY_ATTRACT_A"], False)

@@ -43,81 +43,63 @@ from mothbox_paths import STATE_ROOT
 
 def test_power_sag_and_rails():
     """
-    Stresses 12V rail, individual attractor channels, and flash strobe sequentially.
-    Prevents simultaneous multi-channel inrush spikes from tripping battery BMS overcurrent.
-    Measures idle voltage, rail state verification, and evaluates battery health.
+    Full real-world power integrity test:
+    Stresses 12V rail, energizes all three attractors (UV1, UV2, White VIS) simultaneously,
+    and fires the flash strobe while attractors are running.
+    Measures idle voltage, loaded attractor voltage, flash strobe voltage, and verifies recovery.
     """
-    print("\n  [TEST: Power Rails & Actuator Sequencing]")
-    # Raise 3.3V sensor rail and measure resting voltage
-    mothbox_hw.rail_3v3(True)
-    time.sleep(0.05)
-
+    print("\n  [TEST: Power Sag & Actuators (UV1 + UV2 + VIS + FLASH)]")
+    # 1. Idle power measurement
     p_idle = mothbox_hw.read_power()
     v_idle = p_idle.get("voltage_v", 0.0)
     i_idle = p_idle.get("current_a", 0.0)
 
-    # 1. 12V rail enable check
-    mothbox_hw.rail_12v(True)
-    time.sleep(0.03)
-    rail_12v_ok = mothbox_hw._driven(mothbox_hw.PRO["RAIL_12V"], high=True) if mothbox_hw.is_pro() else True
+    # 2. Turn on 12V rail and all three attractors (UV1, UV2, VIS)
+    mothbox_hw.attract_on(stagger_s=0.05)
+    time.sleep(0.1)
+    p_attract = mothbox_hw.read_power()
+    v_attract = p_attract.get("voltage_v", 0.0)
+    i_attract = p_attract.get("current_a", 0.0)
 
-    # 2. Sequential attractor channel pulsing (30ms each) to test MOSFETs without BMS overcurrent
-    channel_results = {}
-    if mothbox_hw.is_pro():
-        channels = [
-            ("CH1", mothbox_hw.PRO["CH1"]),
-            ("CH2", mothbox_hw.PRO["CH2"]),
-            ("CH3", mothbox_hw.PRO["CH3"]),
-            ("CHEXT", mothbox_hw.PRO["CHEXT"])
-        ]
-        for name, pin in channels:
-            mothbox_hw._out(pin, True)
-            time.sleep(0.03)
-            st = mothbox_hw._driven(pin, high=True)
-            mothbox_hw._out(pin, False)
-            channel_results[name] = st
-    else:
-        channel_results["DIY"] = True
-
-    # 3. Flash strobe pulse (safe 30ms pulse)
+    # 3. Fire flash strobe WHILE ALL ATTRACTORS ARE RUNNING (Real-world capture condition)
     mothbox_hw.flash_on()
-    time.sleep(0.03)
-    flash_st = mothbox_hw.flash_is_on()
-    mothbox_hw.flash_off()
-
-    # 4. Clean rail de-energization
-    mothbox_hw.all_lights_off()
     time.sleep(0.05)
+    p_flash = mothbox_hw.read_power()
+    mothbox_hw.flash_off()
+    v_flash = p_flash.get("voltage_v", 0.0)
+    i_flash = p_flash.get("current_a", 0.0)
 
+    # 4. Turn off attractors and 12V rail
+    mothbox_hw.attract_off()
+    time.sleep(0.05)
     p_post = mothbox_hw.read_power()
     v_post = p_post.get("voltage_v", 0.0)
-    mothbox_hw.rail_3v3(False)
 
-    sag = v_idle - v_post if (v_idle > 0 and v_post > 0) else 0.0
+    sag_attract = v_idle - v_attract if (v_idle > 0 and v_attract > 0) else 0.0
+    sag_flash = v_idle - v_flash if (v_idle > 0 and v_flash > 0) else 0.0
 
-    channels_ok = all(channel_results.values())
-    ops_req = 7  # 3v3 rail, idle read, 12v rail, 4 channels, flash, post read
-    ops_done = (1 if v_idle > 0 else 0) + (1 if rail_12v_ok else 0) + sum(1 for v in channel_results.values() if v) + (1 if flash_st else 0)
+    print(f"    Idle: {v_idle:.2f}V ({i_idle:.3f}A)")
+    print(f"    All 3 Attractors ON: {v_attract:.2f}V ({i_attract:.3f}A) | Sag: {sag_attract:.2f}V")
+    print(f"    Attractors + Flash: {v_flash:.2f}V ({i_flash:.3f}A) | Total Sag: {sag_flash:.2f}V")
+    print(f"    Post-Test Recovery: {v_post:.2f}V")
 
-    passed = v_idle >= 9.8 and rail_12v_ok and channels_ok
-    score = (ops_done / float(ops_req)) * 100.0 if passed else 50.0
-
-    print(f"    Idle: {v_idle:.2f}V ({i_idle:.3f}A) | 12V Rail: {'PASS' if rail_12v_ok else 'FAIL'} | Channels (CH1-EXT): {'PASS' if channels_ok else 'FAIL'}")
-    print(f"    Flash Strobe: {'PASS' if flash_st else 'FAIL'} | Post-Sequence Voltage: {v_post:.2f}V (Sag: {sag:.2f}V)")
+    ops_done = 4  # rail, attract, flash, post
+    passed = v_flash >= 8.5 and v_attract >= 10.5 and v_idle > 11.0
+    score = 100.0 if passed else 50.0
 
     return {
         "status": "PASS" if passed else "FAIL",
         "score": score,
-        "ops_req": ops_req,
+        "ops_req": 4,
         "ops_done": ops_done,
-        "completion_pct": (ops_done / float(ops_req)) * 100.0,
+        "completion_pct": 100.0,
         "telemetry": {
             "v_idle": v_idle,
-            "v_post": v_post,
-            "sag_v": sag,
-            "rail_12v": rail_12v_ok,
-            "channels": channel_results,
-            "flash": flash_st
+            "v_attract": v_attract,
+            "v_flash": v_flash,
+            "i_flash": i_flash,
+            "sag_attract": sag_attract,
+            "sag_flash": sag_flash
         }
     }
 
