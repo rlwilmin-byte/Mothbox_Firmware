@@ -376,7 +376,7 @@ def flashOn(max_duration_s=None):
         try:
             pwr = mothbox_hw.read_power()
             v = pwr.get("voltage_v", -1.0)
-            cutoff_v = 11.0 if (max_duration_s is None or max_duration_s > 1.0) else 9.8
+            cutoff_v = 11.0 if (max_duration_s is None or max_duration_s > 2.0) else 9.8
             if 0.0 < v < cutoff_v:
                 print(f"[TakePhoto] WARNING: Battery voltage ({v:.2f}V < {cutoff_v:.1f}V cutoff) -- INHIBITING FLASH to prevent PMIC halt/brownout!")
                 return False
@@ -857,29 +857,15 @@ def takePhoto_Manual():
         time.sleep(exposureset_delay)#need some time for the settings to sink into the camera)
         
         t_flash_start = time.monotonic()
-        flash_fired = flashOn(max_duration_s=2.5)
+        flash_fired = flashOn(max_duration_s=1.5)
         request = None
         try:
             if flash_fired:
-                # Rolling shutter synchronization:
-                # 1. Flush & release the in-flight frame buffer from libcamera
-                try:
-                    discard_req = picam2.capture_request(flush=True, wait=2.0)
-                    if discard_req:
-                        discard_req.release()
-                except Exception:
-                    pass
-                # 2. Capture the subsequent frame whose entire exposure & readout cycle
-                #    (all 6944 rows) occurs while the flash strobe is fully active.
-                try:
-                    request = picam2.capture_request(flush=False, wait=CAPTURE_TIMEOUT_S)
-                except TypeError:
-                    request = picam2.capture_request(flush=False)
-            else:
-                try:
-                    request = picam2.capture_request(flush=True, wait=CAPTURE_TIMEOUT_S)
-                except TypeError:
-                    request = picam2.capture_request(flush=True)
+                time.sleep(0.005)  # 5ms MOSFET gate & phosphor stabilization buffer
+            try:
+                request = picam2.capture_request(flush=True, wait=CAPTURE_TIMEOUT_S)
+            except TypeError:
+                request = picam2.capture_request(flush=True)
         except Exception as e:
             flashOff()
             warn_no_camera(f"no frame from camera: {e.__class__.__name__}: {e}")
@@ -887,7 +873,7 @@ def takePhoto_Manual():
             flashOff()
             t_flash_dur = time.monotonic() - t_flash_start
             if flash_fired:
-                print(f"[TakePhoto] Photo {i + 1} flash strobe duration: {t_flash_dur * 1000.0:.1f}ms (full rolling window covered)")
+                print(f"[TakePhoto] Photo {i + 1} flash strobe duration: {t_flash_dur * 1000.0:.1f}ms (single frame covered)")
 
         flashtime=time.time()-start
 
@@ -1106,35 +1092,17 @@ def takePhoto_Burst(burst_count=8, interval_s=6.0):
         elapsed_shot = time.monotonic() - t0
         print(f"[Burst] Capturing frame {k + 1}/{burst_count} (target={k * interval_s:.1f}s, actual={elapsed_shot:.2f}s)...")
 
-        # Pulse flash for this frame with full rolling shutter window coverage
+        # Pulse flash for this single frame with rolling shutter window coverage
         t_flash_start = time.monotonic()
-        flash_fired = flashOn(max_duration_s=0.5)
+        flash_fired = flashOn(max_duration_s=1.5)
         request = None
         try:
             if flash_fired:
-                # Rolling shutter synchronization:
-                # 1. Flush & release the in-flight frame buffer from libcamera.
-                #    That frame was already in sensor exposure before the flash lit,
-                #    so capturing it would produce rolling shutter flash banding (half-dark frame).
-                try:
-                    discard_req = picam2.capture_request(flush=True, wait=2.0)
-                    if discard_req:
-                        discard_req.release()
-                except Exception:
-                    pass
-
-                # 2. Capture the subsequent frame whose entire exposure & readout cycle
-                #    (all 6944 rows) occurs while the flash strobe is fully active.
-                try:
-                    request = picam2.capture_request(flush=False, wait=CAPTURE_TIMEOUT_S)
-                except TypeError:
-                    request = picam2.capture_request(flush=False)
-            else:
-                # Flash inhibited (e.g. battery < 9.8V brownout guard) -- capture available light
-                try:
-                    request = picam2.capture_request(flush=True, wait=CAPTURE_TIMEOUT_S)
-                except TypeError:
-                    request = picam2.capture_request(flush=True)
+                time.sleep(0.005)  # 5ms MOSFET gate & phosphor stabilization buffer
+            try:
+                request = picam2.capture_request(flush=True, wait=CAPTURE_TIMEOUT_S)
+            except TypeError:
+                request = picam2.capture_request(flush=True)
         except Exception as e:
             flashOff()
             warn_no_camera(f"no frame from camera in burst frame {k + 1}: {e.__class__.__name__}: {e}")
@@ -1143,7 +1111,7 @@ def takePhoto_Burst(burst_count=8, interval_s=6.0):
             flashOff()
             t_flash_dur = time.monotonic() - t_flash_start
             if flash_fired:
-                print(f"[Burst] Frame {k + 1} flash strobe duration: {t_flash_dur * 1000.0:.1f}ms (full rolling window covered)")
+                print(f"[Burst] Frame {k + 1} flash strobe duration: {t_flash_dur * 1000.0:.1f}ms (single frame covered)")
 
         try:
             pil_image = request.make_image("main")
