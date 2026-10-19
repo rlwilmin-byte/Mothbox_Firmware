@@ -134,12 +134,14 @@ def should_update_display(event, settings_dict, current_mode, next_epoch=None, n
       - 'never': only updates in DEBUG, PARTY, or OFF mode.
       - 'always': updates on every boot and shutdown, unless battery is critically depleted (<9.8V).
       - 'sparse' (default):
-          * Nocturnal Blackout (18:00 - 06:00): ZERO ePaper refreshes during active night
-            capture hours, preserving battery and preventing PMIC brownouts.
-          * Daytime (06:00 - 18:00):
-              - On shutdown: refreshes at dawn (final sleep of cycle, >2h sleep until next wake)
-                to present the night's summary to morning field operators.
-              - On boot: refreshes on daily first boot (>2h since last shutdown) or manual wake.
+          * Daytime (06:00 - 18:00): ALWAYS allows updates on wake (boot) and shutdown (sleep),
+            ensuring operators deploying or collecting boxes receive immediate device feedback
+            (battery %, schedule, device name, storage status, and capture summaries).
+          * End-of-night summary: allows shutdown update at dawn if transitioning to daytime sleep (>2h).
+          * Nocturnal Blackout (18:00 - 06:00): suppresses ePaper updates during active night
+            capture hours, preserving battery and preventing PMIC brownouts or SPI disruptions.
+          * Safety gate: battery voltage < 9.8V always suppresses updates to prevent PMIC brownout.
+          * Override: active media warnings or camera failures always force display updates.
     """
     if current_mode in ("DEBUG", "PARTY", "OFF"):
         return True
@@ -183,35 +185,31 @@ def should_update_display(event, settings_dict, current_mode, next_epoch=None, n
     # ep_mode == 'sparse'
     dt = now_dt or datetime.now()
 
-    # 2. Nocturnal blackout (18:00 to 06:00):
+    # 3. Nocturnal capture hours (18:00 to 06:00):
     # During nighttime capture hours, field displays provide zero human value and
     # risk brownouts/delays during photo sessions.
     if dt.year >= 2024:
         is_night = (dt.hour >= 18 or dt.hour < 6)
         if is_night:
+            # Exception: final sleep of the night session (e.g. dawn shutdown with long sleep > 2h
+            # until the next night's session). Ensures morning collection operators see the night's summary!
+            if event == "shutdown" and next_epoch is not None:
+                now_epoch = time.time()
+                sleep_duration = next_epoch - now_epoch
+                if sleep_duration > 7200:
+                    log_info(f"ePaper sparse mode: night session complete (sleep {sleep_duration/3600:.1f}h > 2h) -- updating dawn summary display.")
+                    return True
+
             log_info(f"ePaper sparse mode: nocturnal blackout active ({dt.strftime('%H:%M')} in 18:00-06:00) -- skipping display refresh.")
             return False
 
-    # 3. Daytime (06:00 to 18:00):
-    if event == "shutdown":
-        if next_epoch is not None:
-            now_epoch = time.time()
-            sleep_duration = next_epoch - now_epoch
-            # If sleep duration > 2 hours, this is the final sleep of the night session (morning summary)
-            return sleep_duration > 7200
+    # 4. Daytime (06:00 to 18:00):
+    # Always allow updates on wake (boot) and shutdown/sleep so operators always receive
+    # immediate feedback when deploying or collecting the box in the field.
+    if event in ("boot", "shutdown"):
         return True
 
-    if event == "boot":
-        try:
-            last_shutdown_str = read_control("last_shutdown_epoch", "0")
-            last_shutdown = float(last_shutdown_str)
-            time_since_shutdown = time.time() - last_shutdown
-            # If shutdown was > 2 hours ago (or never recorded), this is the daily first boot or a manual wake
-            return last_shutdown == 0 or time_since_shutdown > 7200
-        except Exception:
-            return True
-
-    return True
+    return False
 
 
 def configure_wifi_for_mode(mode):
@@ -1374,6 +1372,12 @@ def run_shutdown_pi5(early_reason=None):
     #Update the Epaper screen if policy allows
     if should_update_display("shutdown", settings, mode, next_epoch=next_epoch_time):
         log_info("Updating ePaper display before shutdown (if available)...")
+        if mothbox_hw is not None:
+            try:
+                mothbox_hw.attract_off()
+                mothbox_hw.rail_12v(False)
+            except Exception:
+                pass
         run_helper("/home/pi/Desktop/Mothbox/UpdateDisplay.py", "UpdateDisplay error")
     else:
         log_info(f"Skipping ePaper display update before shutdown (epaper_mode={get_epaper_mode(settings)}).")

@@ -100,13 +100,13 @@ class TestEpaperResilience(unittest.TestCase):
             )
 
     def test_dawn_summary_update_in_sparse_mode(self):
-        """At 06:00 dawn shutdown, sparse mode must update the display with the night's summary."""
+        """At dawn / end-of-night shutdown (sleep > 2h), sparse mode must update the display with the night's summary."""
         settings = {"epaper_mode": "sparse"}
-        dawn_dt = datetime(2026, 10, 19, 6, 0, 0)  # 06:00 AM
+        dawn_dt = datetime(2026, 10, 19, 5, 0, 0)  # 05:00 AM (end of night session)
         
-        # Shutdown at dawn with next epoch 12h away (18:00 tonight, sleep > 2 hours)
+        # Shutdown at end of night with next epoch 13h away (18:00 tonight, sleep > 2 hours)
         now_epoch = 1000000.0
-        next_epoch = now_epoch + 12 * 3600  # 12 hours later
+        next_epoch = now_epoch + 13 * 3600  # 13 hours later
         self.scope["time"].time = lambda: now_epoch
 
         self.assertTrue(
@@ -114,20 +114,18 @@ class TestEpaperResilience(unittest.TestCase):
         )
 
     def test_daytime_boot_in_sparse_mode(self):
-        """Daytime boot (06:00 - 18:00) updates display if first boot / manual wake (>2h since shutdown)."""
+        """Daytime boot (06:00 - 18:00) always updates display on wake and shutdown to give operators feedback."""
         settings = {"epaper_mode": "sparse"}
         day_dt = datetime(2026, 10, 19, 14, 0, 0)  # 2:00 PM
 
         now_epoch = 1000000.0
         self.scope["time"].time = lambda: now_epoch
 
-        # Case 1: First boot (>2h since last shutdown, e.g. 5 hours ago)
-        self.scope["read_control"] = lambda name, default: str(now_epoch - 5 * 3600)
+        # Wake / boot in daytime gives immediate operator feedback
         self.assertTrue(self.should_update_display("boot", settings, "ACTIVE", now_dt=day_dt))
 
-        # Case 2: Frequent reboot (<2h since last shutdown, e.g. 10 minutes ago)
-        self.scope["read_control"] = lambda name, default: str(now_epoch - 600)
-        self.assertFalse(self.should_update_display("boot", settings, "ACTIVE", now_dt=day_dt))
+        # Shutdown / sleep in daytime gives immediate operator feedback
+        self.assertTrue(self.should_update_display("shutdown", settings, "ACTIVE", now_dt=day_dt))
 
     def test_low_voltage_brownout_protection(self):
         """Battery < 9.8V must suppress ePaper update even in 'always' mode."""
