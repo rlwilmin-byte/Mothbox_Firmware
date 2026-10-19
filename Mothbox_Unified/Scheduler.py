@@ -1069,15 +1069,25 @@ def schedule_shutdown(minutes):
                 last_voltage_check = now_time
                 if mothbox_hw is not None:
                     try:
-                        p = mothbox_hw.read_power()
-                        v = float(p.get("voltage_v", -1))
-                        if 0.0 < v < 9.8:
-                            reason = f"critical_battery_{v:.2f}V"
-                            log_section(f"EARLY SHUTDOWN -- Critical Battery ({v:.2f}V)")
-                            log_warn(f"Battery voltage {v:.2f}V < 9.8V brownout floor! Halting Mothbox gracefully to prevent PMIC brownout.")
-                            atomic_update_kv(os.path.join(CONTROL_ROOT, "early_shutdown_reason.txt"), "early_shutdown_reason", reason)
-                            run_shutdown_pi5(early_reason=reason)
-                            break
+                        # Never sample during an active flash strobe (dynamic pulse sag is not battery depletion)
+                        if hasattr(mothbox_hw, "flash_is_on") and mothbox_hw.flash_is_on():
+                            pass
+                        else:
+                            p = mothbox_hw.read_power()
+                            v = float(p.get("voltage_v", -1))
+                            if 0.0 < v < 9.8:
+                                # Debounce: re-sample after 2.0s to confirm persistent resting voltage, not transient recovery
+                                time.sleep(2.0)
+                                if not (hasattr(mothbox_hw, "flash_is_on") and mothbox_hw.flash_is_on()):
+                                    p2 = mothbox_hw.read_power()
+                                    v2 = float(p2.get("voltage_v", -1))
+                                    if 0.0 < v2 < 9.8:
+                                        reason = f"critical_battery_{v2:.2f}V"
+                                        log_section(f"EARLY SHUTDOWN -- Critical Battery ({v2:.2f}V)")
+                                        log_warn(f"Battery resting voltage {v2:.2f}V < 9.8V brownout floor! Halting Mothbox gracefully to prevent PMIC brownout.")
+                                        atomic_update_kv(os.path.join(CONTROL_ROOT, "early_shutdown_reason.txt"), "early_shutdown_reason", reason)
+                                        run_shutdown_pi5(early_reason=reason)
+                                        break
                     except Exception as e:
                         log_warn(f"Periodic battery check error: {e}")
 

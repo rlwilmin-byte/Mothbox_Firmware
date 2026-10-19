@@ -1240,9 +1240,13 @@ if __name__ == "__main__":
             pwr = mothbox_hw.read_power()
             v = float(pwr.get("voltage_v", -1))
             if 0.0 < v < 9.8:
-                print(f"[CRITICAL] Battery voltage {v:.2f}V is below 9.8V brownout floor! Aborting capture to prevent brownout.")
-                trigger_early_shutdown(reason=f"critical_battery_{v:.2f}V")
-                quit()
+                time.sleep(1.0)
+                pwr = mothbox_hw.read_power()
+                v = float(pwr.get("voltage_v", -1))
+                if 0.0 < v < 9.8:
+                    print(f"[CRITICAL] Battery resting voltage {v:.2f}V is below 9.8V brownout floor! Aborting capture to prevent brownout.")
+                    trigger_early_shutdown(reason=f"critical_battery_{v:.2f}V")
+                    quit()
     except Exception as e:
         print(f"[TakePhoto] Battery pre-check exception: {e}")
     
