@@ -218,16 +218,17 @@ def should_update_display(event, settings_dict, current_mode, next_epoch=None, n
     return True
 
 
-def configure_wifi_for_mode(mode):
+def configure_wifi_for_mode(mode, enable_wifi=False):
     """
     Enable wifi for modes that need it, disable for everything else.
     Uses existing MothPower scripts.
+    If enable_wifi is True (configured via CSV), wifi is kept on regardless of mode.
     """
     MOTHPOWER = "/home/pi/Desktop/Mothbox/scripts/MothPower"
     wifi_modes = {"DEBUG", "PARTY", "HI_POW"}
 
-    if mode in wifi_modes:
-        print(f"Mode is {mode} -- enabling wifi")
+    if mode in wifi_modes or enable_wifi:
+        print(f"Mode is {mode} (enable_wifi={enable_wifi}) -- enabling wifi")
         subprocess.run(["bash", f"{MOTHPOWER}/stop_lowpower.sh"], check=False)
         subprocess.run(["bash", f"{MOTHPOWER}/powerup_wifi.sh"], check=False)
     else:
@@ -647,6 +648,7 @@ SETTING_DEFAULTS = {
     "bat_20perVolts": 1.0,
     "epaper_mode":  "sparse",
     "enable_gps":   False,
+    "enable_wifi":  False,
 }
 
 def load_settings_for_wakeup(filepath=None):
@@ -812,6 +814,8 @@ def load_settings(filename):
                     result["epaper_mode"] = value.strip().lower()
                 elif setting == "enable_gps":
                     result["enable_gps"] = value.strip().lower() in ("true", "1", "yes")
+                elif setting in ("enable_wifi", "wifi_enabled"):
+                    result["enable_wifi"] = value.strip().lower() in ("true", "1", "yes")
                 else:
                     print(f"Warning: Unknown setting: {setting}. Ignoring.")
             except (ValueError, TypeError):
@@ -1695,7 +1699,7 @@ def handle_wifi_provisioning(ssid, password, mode):
 
     wifi_modes = {"DEBUG", "HI_POW", "PARTY"}
 
-    if mode in wifi_modes:
+    if mode in wifi_modes or settings.get("enable_wifi", False):
         # Wifi is up -- attempt provisioning now
         success = provision_wifi(ssid, password if has_new_pass else "")
         if success:
@@ -2614,7 +2618,7 @@ if __name__ == "__main__":
     # ----- Mode kills desktop mode for everything but DEBUG and PARTY
     configure_display_for_mode(mode)
 
-    configure_wifi_for_mode(mode)
+    configure_wifi_for_mode(mode, settings.get("enable_wifi", False))
 
     log_section("CONFIGURATION -- WiFi Provisioning")
     handle_wifi_provisioning(settings.get("ssid", None), settings.get("wifipass", None), mode)

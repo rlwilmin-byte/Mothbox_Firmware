@@ -12,7 +12,14 @@ import os
 import time
 import pexpect
 
-HOST = "10.42.0.94"
+CANDIDATES = [sys.argv[1]] if len(sys.argv) > 1 else [
+    os.environ.get("MOTHBOX_HOST"),
+    "192.168.50.5",   # AccessPopup AP default IP
+    "mothbox.local",  # mDNS broadcast
+    "10.42.0.94",     # Ethernet connection
+]
+CANDIDATE_HOSTS = [h for h in CANDIDATES if h]
+HOST = CANDIDATE_HOSTS[0]
 USER = "pi"
 PASS = "luna"
 
@@ -30,36 +37,29 @@ def log(msg, color=RESET):
     print(f"{DIM}[{timestamp}]{RESET} {color}{msg}{RESET}", flush=True)
 
 def wait_for_connection():
-    log("Connecting to Mothbox...", CYAN)
+    global HOST
+    first_attempt = True
     while True:
-        try:
-            # Check ethernet carrier first
-            carrier_up = False
+        for candidate in CANDIDATE_HOSTS:
             try:
-                with open("/sys/class/net/eno1/carrier", "r") as f:
-                    carrier_up = (f.read().strip() == "1")
+                child = pexpect.spawn(
+                    f"ssh -F /dev/null -o StrictHostKeyChecking=no -o ConnectTimeout=2 {USER}@{candidate} 'echo ready'",
+                    timeout=4
+                )
+                idx = child.expect(["password:", pexpect.TIMEOUT, pexpect.EOF], timeout=2)
+                if idx == 0:
+                    child.sendline(PASS)
+                    child.expect(pexpect.EOF, timeout=3)
+                    if b"ready" in child.before:
+                        HOST = candidate
+                        log(f"Connected to Mothbox SSH daemon @ {HOST}!", GREEN + BOLD)
+                        return True
             except Exception:
-                carrier_up = True
+                pass
 
-            if not carrier_up:
-                log("Mothbox ethernet link is down (box is sleeping/powered off). Waiting...", YELLOW)
-                time.sleep(2)
-                continue
-
-            # Attempt SSH
-            child = pexpect.spawn(
-                f"ssh -F /dev/null -o StrictHostKeyChecking=no -o ConnectTimeout=3 {USER}@{HOST} 'echo ready'",
-                timeout=5
-            )
-            idx = child.expect(["password:", pexpect.TIMEOUT, pexpect.EOF], timeout=3)
-            if idx == 0:
-                child.sendline(PASS)
-                child.expect(pexpect.EOF, timeout=5)
-                if b"ready" in child.before:
-                    log("Connected to Mothbox SSH daemon!", GREEN + BOLD)
-                    return True
-        except Exception:
-            pass
+        if first_attempt:
+            log(f"Searching for Mothbox on {', '.join(CANDIDATE_HOSTS)} (sleeping/offline)...", YELLOW)
+            first_attempt = False
         time.sleep(2)
 
 def stream_feed():

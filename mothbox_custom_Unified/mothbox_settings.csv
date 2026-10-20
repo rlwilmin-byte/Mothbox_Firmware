@@ -23,3 +23,4 @@ hardware,pro, auto detects a Mothbox Pro PCB or a DIY relay build at boot. Set t
 backup_interval,5, time in minutes between backups of new photos to the USB drive. Default is 5 (valid 1-999). A final backup always runs at the end of every session regardless
 epaper_mode,sparse, ePaper refresh schedule: 'sparse' (default, refreshes only on daily first wake, morning summary, or manual mode change; blacked out 18:00-06:00), 'always' (refresh every cycle), or 'never' (DEBUG/PARTY/OFF only)
 enable_gps,False, enable GPS time and location queries at boot (False saves ~10s boot latency if no GPS module is installed)
+enable_wifi,True, enable wifi in ACTIVE mode for field observation/telemetry streaming (False saves power in field)

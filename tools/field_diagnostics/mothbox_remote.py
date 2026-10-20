@@ -34,7 +34,7 @@ class RemoteSession:
         self.child = None
 
     def connect(self):
-        cmd = f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 {self.user}@{self.host}"
+        cmd = f"ssh -F /dev/null -o StrictHostKeyChecking=no -o ConnectTimeout=10 {self.user}@{self.host}"
         self.child = pexpect.spawn(cmd, timeout=self.timeout)
         idx = self.child.expect(["password:", pexpect.TIMEOUT, pexpect.EOF], timeout=15)
         if idx != 0:
