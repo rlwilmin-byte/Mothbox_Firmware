@@ -32,7 +32,13 @@ def main():
         except Exception:
             pass
 
+    # Local session log mirroring
+    local_log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+    os.makedirs(local_log_dir, exist_ok=True)
+    session_log = os.path.join(local_log_dir, f"live_feed_{time.strftime('%Y%m%d_%H%M%S')}.log")
+
     print(f"Connecting to Mothbox live stream ({selected_host})...")
+    print(f"Saving local log copy to: {session_log}")
     child = pexpect.spawn(
         f"ssh -F /dev/null -o StrictHostKeyChecking=no {USER}@{selected_host} 'tail -f -n 20 /home/pi/Desktop/Mothbox/logs/TakePhoto_log.txt'",
         timeout=None
@@ -44,7 +50,14 @@ def main():
             print("\n" + "=" * 70)
             print("STREAMING LIVE TAKEPHOTO LOG (Press Ctrl+C to stop)")
             print("=" * 70 + "\n")
-            child.interact()
+            with open(session_log, "a", encoding="utf-8") as f:
+                while True:
+                    line = child.readline().decode(errors="replace")
+                    if not line:
+                        break
+                    print(line, end="", flush=True)
+                    f.write(line)
+                    f.flush()
         else:
             print("Failed to authenticate.")
     except KeyboardInterrupt:

@@ -6,7 +6,7 @@ autoSystemTime,True, leave this as True and the mothbox will automatically set i
 manualTime,2026-02-22 15:26:11, if the autoSystemTime is False the mothbox will get set to whatever value you put here ONE time and then disable manual time setting (to prevent Groundhog Days) until you set AutosystemTime to False again 
 runtime, 55, put how long you want a photo session to go (in minutes). (default 55m for safe RTC shutdown margin) 
 weekday,1;2;3;4;5;6;7, add or remove days 1-7 for monday through sunday 
-hour,19;20;21;22;23;0;1;2;3;4;5,specify what hour you want things to turn on in 24 timeframe separate multi values with a semicolon
+hour,18;19;20;21;22;23;0;1;2;3;4;5,specify what hour you want things to turn on in 24 timeframe separate multi values with a semicolon
 minute,0, specify a specific minute that the schedule will start
 second, 1,not currently used by the mothbox
 bat_voltage,11.1, nominal voltage of the battery (voltage is says on the battery like 12v or 24 v)

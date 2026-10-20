@@ -4,3 +4,7 @@
 # Python cache artifacts
 __pycache__/
 *.pyc
+
+# Local session logs
+logs/
+*.log

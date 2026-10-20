@@ -32,9 +32,28 @@ BOLD = "\033[1m"
 DIM = "\033[2m"
 RESET = "\033[0m"
 
+import re
+
+# Local session log mirroring
+LOCAL_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+os.makedirs(LOCAL_LOG_DIR, exist_ok=True)
+SESSION_LOG_PATH = os.path.join(
+    LOCAL_LOG_DIR, f"telemetry_{time.strftime('%Y%m%d_%H%M%S')}.log"
+)
+ANSI_RE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+
+def emit(text):
+    print(text, flush=True)
+    clean = ANSI_RE.sub('', text)
+    try:
+        with open(SESSION_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(clean + "\n")
+    except Exception:
+        pass
+
 def log(msg, color=RESET):
     timestamp = time.strftime("%H:%M:%S")
-    print(f"{DIM}[{timestamp}]{RESET} {color}{msg}{RESET}", flush=True)
+    emit(f"{DIM}[{timestamp}]{RESET} {color}{msg}{RESET}")
 
 def wait_for_connection():
     global HOST
@@ -63,11 +82,12 @@ def wait_for_connection():
         time.sleep(2)
 
 def stream_feed():
-    print(f"\n{BOLD}{'=' * 80}")
-    print(f"      📡 MOTHBOX LIVE FIELD TELEMETRY FEED (webbedPavo @ {HOST})")
-    print(f"      Streaming TakePhoto & Scheduler logs + INA219 power telemetry")
-    print(f"      Press Ctrl+C to stop streaming")
-    print(f"{'=' * 80}{RESET}\n", flush=True)
+    emit(f"\n{BOLD}{'=' * 80}")
+    emit(f"      📡 MOTHBOX LIVE FIELD TELEMETRY FEED (webbedPavo @ {HOST})")
+    emit(f"      Streaming TakePhoto & Scheduler logs + INA219 power telemetry")
+    emit(f"      Saving local log copy to: {SESSION_LOG_PATH}")
+    emit(f"      Press Ctrl+C to stop streaming")
+    emit(f"{'=' * 80}{RESET}\n")
 
     while True:
         try:
@@ -104,24 +124,24 @@ def stream_feed():
                             pwr_col = CYAN
 
                         tag_label = f"[{p_tag} POWER]" if p_tag == "IDLE" else f"{YELLOW}[FLASH ACTIVE]{RESET}"
-                        print(f"{DIM}[{ts}]{RESET} {BOLD}{pwr_col}{tag_label}{RESET} {v}V / {a}A  |  {BOLD}[PHOTOS]{RESET} {n_photos} saved  |  {BOLD}[MODE]{RESET} {mode}", flush=True)
+                        emit(f"{DIM}[{ts}]{RESET} {BOLD}{pwr_col}{tag_label}{RESET} {v}V / {a}A  |  {BOLD}[PHOTOS]{RESET} {n_photos} saved  |  {BOLD}[MODE]{RESET} {mode}")
 
                 elif line.startswith("__MB_TP__"):
                     msg = line[9:]
                     if "sag -" in msg:
-                        print(f"{DIM}[{ts}]{RESET} {YELLOW}{BOLD}⚡ [FLASH SAG]{RESET} {BOLD}{msg}{RESET}", flush=True)
+                        emit(f"{DIM}[{ts}]{RESET} {YELLOW}{BOLD}⚡ [FLASH SAG]{RESET} {BOLD}{msg}{RESET}")
                     elif "flash" in msg.lower() or "burst" in msg.lower():
                         col = CYAN
-                        print(f"{DIM}[{ts}]{RESET} {col}📸 [TakePhoto] {msg}{RESET}", flush=True)
+                        emit(f"{DIM}[{ts}]{RESET} {col}📸 [TakePhoto] {msg}{RESET}")
                     elif "saved" in msg.lower() or "complete" in msg.lower():
                         col = GREEN + BOLD
-                        print(f"{DIM}[{ts}]{RESET} {col}📸 [TakePhoto] {msg}{RESET}", flush=True)
+                        emit(f"{DIM}[{ts}]{RESET} {col}📸 [TakePhoto] {msg}{RESET}")
                     elif "error" in msg.lower() or "fail" in msg.lower() or "abort" in msg.lower():
                         col = RED + BOLD
-                        print(f"{DIM}[{ts}]{RESET} {col}📸 [TakePhoto] {msg}{RESET}", flush=True)
+                        emit(f"{DIM}[{ts}]{RESET} {col}📸 [TakePhoto] {msg}{RESET}")
                     else:
                         col = RESET
-                        print(f"{DIM}[{ts}]{RESET} {col}📸 [TakePhoto] {msg}{RESET}", flush=True)
+                        emit(f"{DIM}[{ts}]{RESET} {col}📸 [TakePhoto] {msg}{RESET}")
 
                 elif line.startswith("__MB_SCH__"):
                     msg = line[10:]
@@ -133,7 +153,7 @@ def stream_feed():
                         col = RED + BOLD
                     else:
                         col = DIM
-                    print(f"{DIM}[{ts}]{RESET} {col}⏱️  [Scheduler] {msg}{RESET}", flush=True)
+                    emit(f"{DIM}[{ts}]{RESET} {col}⏱️  [Scheduler] {msg}{RESET}")
 
         except KeyboardInterrupt:
             log("\nStreaming stopped by user.", YELLOW)
