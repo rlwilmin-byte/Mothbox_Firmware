@@ -507,25 +507,41 @@ def flash_blank_sd_card(device, image_path, csv_path, dry_run=False, keep_settin
     except Exception as e:
         log(f"Warning during unmount: {e}", "WARN")
 
+    # Pre-authenticate sudo credentials so password prompt doesn't interfere with dd progress
+    try:
+        subprocess.run(["sudo", "-v"], check=True)
+    except Exception:
+        log("Could not obtain sudo privileges.", "ERR")
+        return False
+
     # 3. Stream or write base image to block device
     img_size_str = format_size(os.path.getsize(image_path))
-    log(f"Writing base image to {device} (Size: {img_size_str})...")
+    log(f"Writing base image directly to {device} (Size: {img_size_str})...")
     log(f"Image source: {image_path}")
-    log("Note: This write may take several minutes depending on SD card write speed.")
+    log("Direct physical I/O enabled (oflag=direct): continuous live write progress will stream below.")
+    log("Estimated time: ~3–5 minutes depending on SD card reader speed. Please do not interrupt.")
 
     start_t = time.time()
-    if image_path.endswith(".zip"):
-        cmd = f"unzip -p '{image_path}' | sudo dd of={device} bs=4M status=progress conv=fsync"
-        res = subprocess.run(cmd, shell=True)
-    elif image_path.endswith(".xz"):
-        cmd = f"xzcat '{image_path}' | sudo dd of={device} bs=4M status=progress conv=fsync"
-        res = subprocess.run(cmd, shell=True)
-    else:
-        cmd = ["sudo", "dd", f"if={image_path}", f"of={device}", "bs=4M", "status=progress", "conv=fsync"]
-        res = subprocess.run(cmd)
+    try:
+        if image_path.endswith(".zip"):
+            cmd = f"unzip -p '{image_path}' | sudo dd of={device} bs=4M oflag=direct status=progress conv=fsync"
+            res = subprocess.run(cmd, shell=True)
+        elif image_path.endswith(".xz"):
+            cmd = f"xzcat '{image_path}' | sudo dd of={device} bs=4M oflag=direct status=progress conv=fsync"
+            res = subprocess.run(cmd, shell=True)
+        else:
+            cmd = ["sudo", "dd", f"if={image_path}", f"of={device}", "bs=4M", "oflag=direct", "status=progress", "conv=fsync"]
+            res = subprocess.run(cmd)
+    except KeyboardInterrupt:
+        print()
+        log("Image flash interrupted by user (Ctrl+C). Aborting.", "WARN")
+        return False
 
     if res.returncode != 0:
-        log(f"Image write failed with exit code {res.returncode}", "ERR")
+        if res.returncode in (-2, 130):
+            log("Image write interrupted by user (Ctrl+C).", "WARN")
+        else:
+            log(f"Image write failed with exit code {res.returncode}", "ERR")
         return False
 
     write_t = time.time() - start_t
@@ -898,7 +914,7 @@ def main():
         if not args.yes and not args.dry_run:
             try:
                 confirm = input(f"{YELLOW}Type '{BOLD}ERASE{RESET}{YELLOW}' to confirm and begin full disk image flash: {RESET}").strip()
-                if confirm != "ERASE":
+                if confirm.upper() != "ERASE":
                     log("Image flash cancelled by user. No data was modified.", "WARN")
                     sys.exit(0)
             except KeyboardInterrupt:

@@ -1488,7 +1488,7 @@ def run_shutdown_pi5_FAST(early_reason=None):
     # Note: OFF mode bypasses this check intentionally -- if the user flipped the
     # Active switch off, they want the device to shut down regardless of schedule.
     current_mode = read_control("mode", "ACTIVE")
-    if current_mode != "OFF" and not early_reason:
+    if current_mode not in ("OFF", "STANDBY") and not early_reason:
         cron_source = switch_schedule if use_switch_schedule else load_settings_for_wakeup()
         current_runtime = int(read_control("runtime", runtime))
         remaining_minutes = should_abort_shutdown(cron_source, current_runtime)
@@ -1505,6 +1505,8 @@ def run_shutdown_pi5_FAST(early_reason=None):
             return
     elif early_reason:
         log_info(f"Early shutdown active ({early_reason}) -- session window guard bypassed.")
+    else:
+        log_info(f"Fast shutdown requested for mode='{current_mode}' -- session window guard bypassed.")
     # --- End guard ---
 
     arm_shutdown_deadman()
@@ -2284,7 +2286,7 @@ if __name__ == "__main__":
                              f"Aborting active session to prevent PMIC brownout crash loop.")
                     atomic_update_kv(os.path.join(CONTROL_ROOT, "mode.txt"), "mode", "STANDBY")
                     run_script("/home/pi/Desktop/Mothbox/Diagnostics.py", "Standby_Check", show_output=True)
-                    run_shutdown_pi5_FAST()
+                    run_shutdown_pi5_FAST(early_reason="critical_battery_crash_recovery")
                     sys.exit(0)
             except Exception as e:
                 log_warn(f"[CRASH_RECOVERY] Battery voltage pre-check error ({e}) -- proceeding.")

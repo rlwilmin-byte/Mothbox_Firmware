@@ -49,6 +49,38 @@ from pathlib import Path
 from datetime import datetime
 import sys
 import time
+import fcntl
+import errno
+
+_backup_lock = None
+
+def acquire_backup_lock(final=False):
+    """Ensures only one instance of Backup_Files.py runs at a time."""
+    global _backup_lock
+    for lock_path in ["/run/mothbox_backup.lock", "/tmp/mothbox_backup.lock"]:
+        try:
+            _backup_lock = open(lock_path, "a+")
+            if final:
+                # If final shutdown backup, wait up to 15s for in-flight cron backup to finish
+                for _ in range(15):
+                    try:
+                        fcntl.flock(_backup_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        return True
+                    except (BlockingIOError, OSError):
+                        time.sleep(1)
+                fcntl.flock(_backup_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                fcntl.flock(_backup_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except (BlockingIOError, OSError) as e:
+            if isinstance(e, BlockingIOError) or getattr(e, "errno", None) in (errno.EAGAIN, errno.EWOULDBLOCK):
+                print("[Backup] Another backup is already in progress -- skipping this cycle.")
+                sys.exit(0)
+            continue
+        except Exception as e:
+            print(f"[Backup] Could not take backup lock ({e}) -- proceeding anyway.")
+            return True
+    return True
 
 
 from pathlib import Path
@@ -710,9 +742,15 @@ def incremental_backup_photos(source_dir, dest_root, backedup_dir, max_bytes=MAX
         if target_file.exists() and target_file.stat().st_size == file_sz:
             backup_target = backedup_path / rel
             backup_target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(src_file), str(backup_target))
-            copied_count += 1
-            copied_bytes += file_sz
+            try:
+                shutil.move(str(src_file), str(backup_target))
+                copied_count += 1
+                copied_bytes += file_sz
+            except FileNotFoundError:
+                # Concurrent backup or external move already relocated the file
+                pass
+            except Exception as e:
+                print(f"[Backup] Warning: could not move {src_file.name} to backedup: {e}")
         else:
             print(f"[Backup] Verification failed for {src_file.name} -- leaving in source directory.")
 
@@ -769,6 +807,8 @@ if __name__ == "__main__":
     FINAL_BACKUP = "--final" in sys.argv[1:]
     if os.path.exists(BOOT_LOCK) and not FINAL_BACKUP:
         sys.exit(0)
+
+    acquire_backup_lock(final=FINAL_BACKUP)
 
     if FINAL_BACKUP:
         print("Final end-of-session backup requested -- skipping interval throttle.")
