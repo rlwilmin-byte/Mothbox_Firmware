@@ -108,7 +108,7 @@ def banner():
 # SD Card Detection & Flashing
 # ---------------------------------------------------------------------------
 
-def find_sd_mounts():
+def find_sd_mounts(target_dev=None):
     """
     Scans for attached Mothbox SD cards using lsblk block device topology (<0.05s)
     and user media mount directories. Automatically mounts unmounted partitions via udisksctl.
@@ -122,18 +122,34 @@ def find_sd_mounts():
     # Step 1: Use lsblk to inspect block devices directly (fast, accurate, no filesystem hanging)
     try:
         out = subprocess.check_output(
-            ["lsblk", "-J", "-p", "-o", "NAME,MOUNTPOINTS,LABEL,FSTYPE,SIZE,RM,TYPE,PKNAME"],
+            ["lsblk", "-J", "-p", "-b", "-o", "NAME,MOUNTPOINTS,LABEL,FSTYPE,SIZE,RM,TYPE,PKNAME"],
             text=True, timeout=3
         )
         data = json.loads(out)
         for dev in data.get("blockdevices", []):
-            children = dev.get("children", [])
-            if not children:
-                continue
-
             # CRITICAL: Only scan removable devices (SD cards, USB drives) -- NEVER internal NVMe/SATA host disks!
             is_removable = dev.get("rm", False)
             if not is_removable:
+                continue
+            if dev.get("type") != "disk":
+                continue
+
+            dev_name = dev.get("name", "")
+            if target_dev and dev_name != target_dev:
+                continue
+
+            raw_size = dev.get("size") or 0
+            try:
+                size_bytes = int(raw_size)
+            except (ValueError, TypeError):
+                size_bytes = 0
+
+            # Ignore empty card reader slots with no media inserted
+            if size_bytes <= 0:
+                continue
+
+            children = dev.get("children", [])
+            if not children:
                 continue
 
             for child in children:
@@ -176,7 +192,15 @@ def find_sd_mounts():
                         rootfs_path = new_mp
                         log(f"Successfully auto-mounted rootfs: {unmounted_root_dev} -> {rootfs_path}", "OK")
             else:
-                log(f"Could not auto-mount {unmounted_root_dev} via udisksctl: {m_res.stderr.strip()}", "WARN")
+                user = getpass.getuser()
+                mnt_dir = f"/media/{user}/rootfs"
+                os.makedirs(mnt_dir, exist_ok=True)
+                s_res = subprocess.run(["sudo", "mount", unmounted_root_dev, mnt_dir], capture_output=True, text=True)
+                if s_res.returncode == 0:
+                    rootfs_path = mnt_dir
+                    log(f"Successfully auto-mounted rootfs via sudo: {unmounted_root_dev} -> {rootfs_path}", "OK")
+                else:
+                    log(f"Could not auto-mount {unmounted_root_dev} via udisksctl: {m_res.stderr.strip()}", "WARN")
         except Exception as e:
             log(f"Auto-mount error for rootfs: {e}", "WARN")
 
@@ -192,7 +216,15 @@ def find_sd_mounts():
                         bootfs_path = new_mp
                         log(f"Successfully auto-mounted bootfs: {unmounted_boot_dev} -> {bootfs_path}", "OK")
             else:
-                log(f"Could not auto-mount {unmounted_boot_dev} via udisksctl: {m_res.stderr.strip()}", "WARN")
+                user = getpass.getuser()
+                mnt_dir = f"/media/{user}/bootfs"
+                os.makedirs(mnt_dir, exist_ok=True)
+                s_res = subprocess.run(["sudo", "mount", unmounted_boot_dev, mnt_dir], capture_output=True, text=True)
+                if s_res.returncode == 0:
+                    bootfs_path = mnt_dir
+                    log(f"Successfully auto-mounted bootfs via sudo: {unmounted_boot_dev} -> {bootfs_path}", "OK")
+                else:
+                    log(f"Could not auto-mount {unmounted_boot_dev} via udisksctl: {m_res.stderr.strip()}", "WARN")
         except Exception as e:
             log(f"Auto-mount error for bootfs: {e}", "WARN")
 
@@ -234,7 +266,7 @@ def find_sd_mounts():
         if rootfs_path:
             desc_parts.append(f"Rootfs: {rootfs_path}")
         else:
-            desc_parts.append(f"Rootfs: [Unmounted: {unmounted_root_dev or 'sda2'}]")
+            desc_parts.append(f"Rootfs: [Unmounted: {unmounted_root_dev or 'Pending'}]")
         if bootfs_path:
             desc_parts.append(f"Bootfs: {bootfs_path}")
 
@@ -269,18 +301,21 @@ def flash_sd_card(rootfs, bootfs, csv_path, dry_run=False, keep_settings=False, 
         if bootfs and bootfs != rootfs and not keep_settings and os.path.exists(csv_path):
             log(f"Deploying preferred settings CSV to bootfs ({os.path.basename(csv_path)})...")
             custom_dir = os.path.join(bootfs, "mothbox_custom")
-            if os.path.isfile(custom_dir) or os.path.islink(custom_dir):
-                log(f"Warning: {custom_dir} is an unexpected file. Removing to create directory...", "WARN")
+            try:
+                if os.path.isfile(custom_dir) or os.path.islink(custom_dir):
+                    log(f"Warning: {custom_dir} is an unexpected file. Removing to create directory...", "WARN")
+                    if not dry_run:
+                        os.remove(custom_dir)
                 if not dry_run:
-                    os.remove(custom_dir)
-            if not dry_run:
-                os.makedirs(custom_dir, exist_ok=True)
-            bootfs_csv = os.path.join(custom_dir, "mothbox_settings.csv")
-            if not dry_run:
-                shutil.copy2(csv_path, bootfs_csv)
-                subprocess.run(["sync"])
-            log(f"Settings successfully deployed to bootfs: {bootfs_csv}", "OK")
-            return True
+                    os.makedirs(custom_dir, exist_ok=True)
+                bootfs_csv = os.path.join(custom_dir, "mothbox_settings.csv")
+                if not dry_run:
+                    shutil.copy2(csv_path, bootfs_csv)
+                    subprocess.run(["sync"])
+                log(f"Settings successfully deployed to bootfs: {bootfs_csv}", "OK")
+            except OSError as e:
+                log(f"Failed to deploy settings to bootfs: {e}", "WARN")
+        log("Firmware files could NOT be synchronized because rootfs is unmounted.", "ERR")
         return False
 
     target_dir = os.path.join(rootfs, "home", "pi", "Desktop", "Mothbox")
@@ -325,16 +360,19 @@ def flash_sd_card(rootfs, bootfs, csv_path, dry_run=False, keep_settings=False, 
         # 2. Bootfs copy
         if bootfs and bootfs != rootfs:
             custom_dir = os.path.join(bootfs, "mothbox_custom")
-            if os.path.isfile(custom_dir) or os.path.islink(custom_dir):
-                log(f"Warning: {custom_dir} is an unexpected file. Removing to create directory...", "WARN")
+            try:
+                if os.path.isfile(custom_dir) or os.path.islink(custom_dir):
+                    log(f"Warning: {custom_dir} is an unexpected file. Removing to create directory...", "WARN")
+                    if not dry_run:
+                        os.remove(custom_dir)
                 if not dry_run:
-                    os.remove(custom_dir)
-            if not dry_run:
-                os.makedirs(custom_dir, exist_ok=True)
-            bootfs_csv = os.path.join(custom_dir, "mothbox_settings.csv")
-            if not dry_run:
-                shutil.copy2(csv_path, bootfs_csv)
-            log(f"Copied to bootfs: {bootfs_csv}", "OK")
+                    os.makedirs(custom_dir, exist_ok=True)
+                bootfs_csv = os.path.join(custom_dir, "mothbox_settings.csv")
+                if not dry_run:
+                    shutil.copy2(csv_path, bootfs_csv)
+                log(f"Copied to bootfs: {bootfs_csv}", "OK")
+            except OSError as e:
+                log(f"Warning: Could not copy settings CSV to bootfs: {e}", "WARN")
     elif keep_settings:
         log("Skipping settings CSV update (--keep-settings specified).")
 
@@ -394,11 +432,12 @@ def find_blank_drives():
     """
     Scans for attached removable block devices that are NOT already partitioned
     as Mothbox cards (e.g. blank SD cards or storage cards with non-Mothbox filesystems).
+    Ignores empty card reader slots (size = 0) and host drives.
     """
     drives = []
     try:
         out = subprocess.check_output(
-            ["lsblk", "-J", "-p", "-o", "NAME,MOUNTPOINTS,LABEL,FSTYPE,SIZE,RM,TYPE,MODEL,VENDOR"],
+            ["lsblk", "-J", "-p", "-b", "-o", "NAME,MOUNTPOINTS,LABEL,FSTYPE,SIZE,RM,TYPE,MODEL,VENDOR"],
             text=True, timeout=3
         )
         data = json.loads(out)
@@ -406,9 +445,25 @@ def find_blank_drives():
             # Only consider removable drives (SD cards, USB drives)
             if not dev.get("rm", False):
                 continue
+            if dev.get("type") != "disk":
+                continue
 
             dev_name = dev.get("name", "")
-            dev_size = dev.get("size", "")
+            raw_size = dev.get("size") or 0
+            try:
+                size_bytes = int(raw_size)
+            except (ValueError, TypeError):
+                size_bytes = 0
+
+            # CRITICAL: Empty card reader slots report rm=True but size=0 (no medium inserted)
+            if size_bytes <= 0:
+                continue
+
+            # Skip tiny drives (< 1 GB) that cannot hold an OS image
+            if size_bytes < 1024 * 1024 * 1024:
+                continue
+
+            dev_size = format_size(size_bytes)
             dev_model = dev.get("model", "") or dev.get("vendor", "") or "Removable Storage"
             children = dev.get("children", [])
 
@@ -441,12 +496,14 @@ def find_blank_drives():
                 for child in children:
                     c_name = child.get("name", "")
                     c_label = child.get("label", "") or "NoLabel"
-                    c_size = child.get("size", "")
+                    c_size_bytes = int(child.get("size") or 0)
+                    c_size = format_size(c_size_bytes) if c_size_bytes else child.get("size", "")
                     part_descs.append(f"{os.path.basename(c_name)} ({c_size}, {c_label})")
 
                 drives.append({
                     "device": dev_name,
                     "size": dev_size,
+                    "size_bytes": size_bytes,
                     "model": dev_model.strip(),
                     "partitions": [c.get("name") for c in children],
                     "part_descs": ", ".join(part_descs) if part_descs else "Raw / Unpartitioned",
@@ -472,17 +529,41 @@ def flash_blank_sd_card(device, image_path, csv_path, dry_run=False, keep_settin
         return False
 
     try:
-        out = subprocess.check_output(["lsblk", "-J", "-p", "-o", "NAME,MOUNTPOINTS,RM", device], text=True)
+        out = subprocess.check_output(["lsblk", "-J", "-p", "-b", "-o", "NAME,MOUNTPOINTS,RM,SIZE,TYPE"], text=True)
         dev_data = json.loads(out)
+        target_info = None
         for d in dev_data.get("blockdevices", []):
-            if not d.get("rm", False):
-                log(f"FATAL SAFETY ERROR: Device {device} is marked as non-removable in kernel! Aborting.", "ERR")
-                return False
-            for child in d.get("children", [d]):
-                for mp in child.get("mountpoints", []):
-                    if mp in ("/", "/home", "/boot", "/boot/efi", "/root"):
-                        log(f"FATAL SAFETY ERROR: Device {device} holds host mount '{mp}'! Aborting.", "ERR")
-                        return False
+            if d.get("name") == device:
+                target_info = d
+                break
+            for child in d.get("children", []):
+                if child.get("name") == device:
+                    target_info = child
+                    break
+
+        if not target_info:
+            log(f"FATAL ERROR: Target device {device} not found in system block devices!", "ERR")
+            return False
+
+        if not target_info.get("rm", False):
+            log(f"FATAL SAFETY ERROR: Device {device} is marked as non-removable in kernel! Aborting.", "ERR")
+            return False
+
+        dev_bytes = int(target_info.get("size") or 0)
+        if dev_bytes <= 0:
+            log(f"FATAL ERROR: Target device {device} has no media inserted (size is 0 bytes)! Check card reader slot.", "ERR")
+            return False
+
+        img_bytes = os.path.getsize(image_path)
+        if dev_bytes < img_bytes:
+            log(f"FATAL ERROR: Target device {device} ({format_size(dev_bytes)}) is smaller than base OS image ({format_size(img_bytes)})! Aborting.", "ERR")
+            return False
+
+        for child in target_info.get("children", [target_info]):
+            for mp in child.get("mountpoints", []):
+                if mp in ("/", "/home", "/boot", "/boot/efi", "/root"):
+                    log(f"FATAL SAFETY ERROR: Device {device} holds host mount '{mp}'! Aborting.", "ERR")
+                    return False
     except Exception as e:
         log(f"Safety verification failed: {e}", "ERR")
         return False
@@ -555,10 +636,10 @@ def flash_blank_sd_card(device, image_path, csv_path, dry_run=False, keep_settin
 
     # 5. Discover newly written partitions and auto-mount
     log("Discovering and auto-mounting newly created Mothbox partitions...")
-    sd_candidates = find_sd_mounts()
+    sd_candidates = find_sd_mounts(target_dev=device)
     if not sd_candidates:
         time.sleep(2)
-        sd_candidates = find_sd_mounts()
+        sd_candidates = find_sd_mounts(target_dev=device)
 
     if not sd_candidates or not sd_candidates[0].get("rootfs"):
         log("Could not auto-mount newly flashed partitions immediately.", "WARN")
@@ -816,10 +897,24 @@ def main():
         # Determine target device
         if args.blank != "auto":
             b_dev = args.blank
+            b_size = "Unknown"
+            b_model = "Specified Drive"
+            try:
+                b_out = subprocess.check_output(["lsblk", "-J", "-p", "-b", "-o", "NAME,SIZE,MODEL,VENDOR", b_dev], text=True)
+                b_data = json.loads(b_out)
+                for bd in b_data.get("blockdevices", []):
+                    if bd.get("name") == b_dev:
+                        b_raw_size = int(bd.get("size") or 0)
+                        b_size = format_size(b_raw_size)
+                        b_model = (bd.get("model") or bd.get("vendor") or "Removable Storage").strip()
+                        break
+            except Exception:
+                pass
+
             blank_info = {
                 "device": b_dev,
-                "size": "Unknown",
-                "model": "Specified Drive",
+                "size": b_size,
+                "model": b_model,
                 "part_descs": "Raw",
                 "image": base_img,
                 "image_size": format_size(os.path.getsize(base_img))
@@ -829,7 +924,23 @@ def main():
             if not drives:
                 log("No blank/uninitialized removable drives found. Ensure the SD card is plugged in.", "ERR")
                 sys.exit(1)
-            blank_info = drives[0]
+            if len(drives) == 1:
+                b_drive = drives[0]
+            else:
+                print(f"\n{BOLD}Multiple candidate removable drives detected:{RESET}")
+                for i, d in enumerate(drives, 1):
+                    print(f"  [{i}] {d['desc']}")
+                try:
+                    choice = input(f"{YELLOW}Select drive to flash [1-{len(drives)}]: {RESET}").strip()
+                    if choice.isdigit() and 1 <= int(choice) <= len(drives):
+                        b_drive = drives[int(choice) - 1]
+                    else:
+                        log("Invalid drive selection.", "ERR")
+                        sys.exit(1)
+                except KeyboardInterrupt:
+                    print("\nAborted.")
+                    sys.exit(0)
+            blank_info = b_drive
             blank_info["image"] = base_img
             blank_info["image_size"] = format_size(os.path.getsize(base_img))
 
@@ -861,21 +972,41 @@ def main():
             blank_drives = find_blank_drives()
             base_images = [args.image] if (args.image and os.path.isfile(args.image)) else find_base_images()
             if blank_drives and base_images:
-                b_drive = blank_drives[0]
                 b_img = base_images[0]
                 b_img_size = format_size(os.path.getsize(b_img))
-                log(f"Auto-detected blank / uninitialized removable drive: {b_drive['desc']}")
-                log(f"Found base Mothbox OS image: {os.path.basename(b_img)} ({b_img_size})")
-                try:
-                    ask = input(f"{YELLOW}Initialize and flash base Mothbox OS image to {b_drive['device']}? [y/N]: {RESET}").strip().lower()
+                if len(blank_drives) == 1:
+                    b_drive = blank_drives[0]
+                else:
+                    print(f"\n{BOLD}Multiple candidate removable drives detected:{RESET}")
+                    for i, d in enumerate(blank_drives, 1):
+                        print(f"  [{i}] {d['desc']}")
+                    try:
+                        choice = input(f"{YELLOW}Select drive to flash [1-{len(blank_drives)}] (or Enter to cancel): {RESET}").strip()
+                        if choice.isdigit() and 1 <= int(choice) <= len(blank_drives):
+                            b_drive = blank_drives[int(choice) - 1]
+                        else:
+                            b_drive = None
+                    except KeyboardInterrupt:
+                        print("\nAborted.")
+                        sys.exit(0)
+
+                if b_drive:
+                    log(f"Auto-detected blank / uninitialized removable drive: {b_drive['desc']}")
+                    log(f"Found base Mothbox OS image: {os.path.basename(b_img)} ({b_img_size})")
+                    if args.yes:
+                        ask = "y"
+                    else:
+                        try:
+                            ask = input(f"{YELLOW}Initialize and flash base Mothbox OS image to {b_drive['device']}? [y/N]: {RESET}").strip().lower()
+                        except KeyboardInterrupt:
+                            print("\nAborted.")
+                            sys.exit(0)
+
                     if ask in ("y", "yes"):
                         target_type = "blank_sd"
                         blank_info = b_drive
                         blank_info["image"] = b_img
                         blank_info["image_size"] = b_img_size
-                except KeyboardInterrupt:
-                    print("\nAborted.")
-                    sys.exit(0)
 
         # C. Check Network
         if not target_type:
@@ -925,7 +1056,11 @@ def main():
         if target_type == "network":
             print(f"  • Connection:  Network SSH ({DEFAULT_USER}@{target_host})")
         else:
-            root_display = sd_info.get("rootfs") or f"[UNMOUNTED: run 'udisksctl mount -b {sd_info.get('unmounted_root_dev', '/dev/sda2')}']"
+            root_dev_display = sd_info.get("unmounted_root_dev")
+            if root_dev_display:
+                root_display = sd_info.get("rootfs") or f"[UNMOUNTED: run 'udisksctl mount -b {root_dev_display}']"
+            else:
+                root_display = sd_info.get("rootfs") or "[UNMOUNTED]"
             print(f"  • Connection:  Direct SD Card")
             print(f"  • Rootfs:      {root_display}")
             print(f"  • Bootfs:      {sd_info.get('bootfs') or '[None]'}")
