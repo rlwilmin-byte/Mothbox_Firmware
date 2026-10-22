@@ -385,6 +385,55 @@ def flash_sd_card(rootfs, bootfs, csv_path, dry_run=False, keep_settings=False, 
     return True
 
 
+def check_firmware_diffs(src_dir, target_dir):
+    """
+    Compares local source firmware against target directory using rsync dry-run.
+    Returns list of relative filepaths that differ, or None if target directory does not exist or error.
+    """
+    if not os.path.isdir(target_dir):
+        return None
+    cmd = [
+        "rsync", "-avn",
+        "--exclude", "__pycache__",
+        "--exclude", "*.pyc",
+        "--exclude", ".git*",
+        "--exclude", "tests/",
+        "--exclude", "photos/",
+        "--exclude", "logs/",
+        f"{src_dir}/",
+        f"{target_dir}/"
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if res.returncode != 0:
+            return None
+        lines = [l.strip() for l in res.stdout.splitlines() if l.strip()]
+        diff_files = []
+        started = False
+        for line in lines:
+            if line == "sending incremental file list":
+                started = True
+                continue
+            if line.startswith("sent ") and "bytes" in line:
+                break
+            if started and line and not line.endswith("/"):
+                diff_files.append(line)
+        return diff_files
+    except Exception:
+        return None
+
+
+def check_csv_match(src_csv, target_csv):
+    """Checks whether two settings CSV files exist and are identical in content."""
+    if not os.path.isfile(src_csv) or not os.path.isfile(target_csv):
+        return False
+    try:
+        with open(src_csv, "rb") as f1, open(target_csv, "rb") as f2:
+            return f1.read().strip() == f2.read().strip()
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Blank / Unformatted SD Card Imaging
 # ---------------------------------------------------------------------------
@@ -628,23 +677,65 @@ def flash_blank_sd_card(device, image_path, csv_path, dry_run=False, keep_settin
     write_t = time.time() - start_t
     log(f"Base OS image written successfully to {device} in {write_t:.1f}s!", "OK")
 
-    # 4. Kernel partition re-probe
-    log("Notifying kernel of new partition table (partprobe)...")
-    subprocess.run(["sudo", "partprobe", device], capture_output=True)
-    subprocess.run(["udevadm", "settle"], capture_output=True)
-    time.sleep(2)
+    # 4. Kernel partition re-probe (unmount stale mounts, rescan SCSI bus & reload partition table)
+    log("Re-probing kernel partition table and auto-mounting newly created partitions...")
+    try:
+        # Unmount any stale mounts that might lock the block device
+        out = subprocess.check_output(["lsblk", "-n", "-r", "-o", "NAME,MOUNTPOINTS", device], text=True)
+        for line in out.strip().splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[1]:
+                subprocess.run(["udisksctl", "unmount", "-b", parts[0]], capture_output=True)
+    except Exception:
+        pass
 
-    # 5. Discover newly written partitions and auto-mount
+    try:
+        # Refresh sudo credentials (writes often take > 10-15 minutes, exceeding sudo timeout)
+        subprocess.run(["sudo", "-v"])
+
+        # Method A: Sysfs SCSI rescan (forces kernel SCSI subsystem to re-probe device geometry)
+        dev_short = os.path.basename(device)
+        rescan_path = f"/sys/block/{dev_short}/device/rescan"
+        if os.path.exists(rescan_path):
+            subprocess.run(f"echo 1 | sudo tee {rescan_path} > /dev/null", shell=True)
+
+        # Method B: Re-read partition table via blockdev and partprobe
+        subprocess.run(["sudo", "blockdev", "--rereadpt", device], capture_output=True)
+        subprocess.run(["sudo", "partprobe", device], capture_output=True)
+
+        # Method C: Trigger udev change event
+        subprocess.run(["sudo", "udevadm", "trigger", "--subsystem-match=block", "--action=change", device], capture_output=True)
+        subprocess.run(["udevadm", "settle", "--timeout=5"], capture_output=True)
+    except Exception as e:
+        log(f"Warning during partition re-probe: {e}", "WARN")
+
+    # 5. Discover newly written partitions and auto-mount (poll up to 5 attempts)
     log("Discovering and auto-mounting newly created Mothbox partitions...")
-    sd_candidates = find_sd_mounts(target_dev=device)
-    if not sd_candidates:
-        time.sleep(2)
+    sd_info = None
+    for attempt in range(1, 6):
+        time.sleep(1.2)
         sd_candidates = find_sd_mounts(target_dev=device)
+        if sd_candidates and sd_candidates[0].get("rootfs"):
+            sd_info = sd_candidates[0]
+            break
 
-    if not sd_candidates or not sd_candidates[0].get("rootfs"):
-        log("Could not auto-mount newly flashed partitions immediately.", "WARN")
-        log("The base image is written. Please re-insert the card and run 'python3 flash_mothbox.py' to complete firmware sync.", "INFO")
-        return True
+    if not sd_info or not sd_info.get("rootfs"):
+        print(f"\n{YELLOW}{BOLD}{'=' * 75}")
+        print("  ⚠️   ACTION REQUIRED: PHYSICAL RE-INSERTION NEEDED TO FINISH SYNC   ⚠️")
+        print(f"{'=' * 75}{RESET}")
+        print(f"  • Base OS Image:     {GREEN}{BOLD}Successfully burned{RESET} to {device} ({img_size_str})")
+        print("  • Operating System:  Mothbox Pro Pi 5 Base OS v6.0.1")
+        print("  • Partition Status:  Kernel cached the old partition table in RAM.")
+        print()
+        print(f"  {BOLD}{CYAN}>>> NEXT STEP TO COMPLETE SETUP:{RESET}")
+        print(f"  {BOLD}1. Physically unplug the SD card from your laptop / USB reader.{RESET}")
+        print(f"  {BOLD}2. Plug it back into the laptop.{RESET}")
+        print(f"  {BOLD}3. Run:{RESET} {GREEN}{BOLD}python3 flash_mothbox.py{RESET}")
+        print()
+        print("  The flasher will auto-detect the card and complete the 20-second")
+        print("  firmware overlay and configuration sync automatically.")
+        print(f"{YELLOW}{BOLD}{'=' * 75}{RESET}\n")
+        return False
 
     sd_info = sd_candidates[0]
     log(f"Successfully mounted newly imaged SD partitions:", "OK")
@@ -1052,6 +1143,23 @@ def main():
                 print("\nAborted.")
                 sys.exit(0)
     else:
+        # Check if target firmware matches latest repository patch
+        is_up_to_date = False
+        diff_count = 0
+        diff_files_sample = []
+
+        if target_type == "sd" and sd_info.get("rootfs"):
+            target_fw_dir = os.path.join(sd_info["rootfs"], "home", "pi", "Desktop", "Mothbox")
+            if os.path.isdir(target_fw_dir):
+                diffs = check_firmware_diffs(FIRMWARE_SRC, target_fw_dir)
+                target_csv = os.path.join(target_fw_dir, "mothbox_settings.csv")
+                csv_matches = check_csv_match(args.csv, target_csv)
+                if diffs is not None:
+                    diff_count = len(diffs)
+                    diff_files_sample = diffs[:4]
+                    if diff_count == 0 and (args.keep_settings or csv_matches):
+                        is_up_to_date = True
+
         print(f"\n{BOLD}Target Summary:{RESET}")
         if target_type == "network":
             print(f"  • Connection:  Network SSH ({DEFAULT_USER}@{target_host})")
@@ -1067,17 +1175,38 @@ def main():
         print(f"  • Source:      {FIRMWARE_SRC}")
         print(f"  • Settings:    {'Preserve existing' if args.keep_settings else args.csv}")
         print(f"  • Mode:        {'DRY RUN (Preview only)' if args.dry_run else 'LIVE FLASH'}")
+
+        if is_up_to_date:
+            print(f"  • Status:      {GREEN}{BOLD}✨ Target already matches latest patch! (0 pending changes){RESET}")
+        elif diff_count > 0:
+            sample_str = ", ".join(diff_files_sample)
+            if diff_count > len(diff_files_sample):
+                sample_str += f", +{diff_count - len(diff_files_sample)} more"
+            print(f"  • Status:      {YELLOW}{BOLD}⚡ Updates available: {diff_count} file(s) ({sample_str}){RESET}")
+
         print()
 
-        if not args.yes:
-            try:
-                confirm = input(f"{YELLOW}Proceed with firmware flash? [Y/n]: {RESET}").strip().lower()
-                if confirm and confirm not in ("y", "yes"):
-                    log("Flash aborted by user.", "WARN")
+        if is_up_to_date:
+            log("Firmware on target SD card already matches the latest repository patch!", "OK")
+            if not args.yes:
+                try:
+                    confirm = input(f"{YELLOW}Target already has the latest firmware patch. Reflash anyway? [y/N]: {RESET}").strip().lower()
+                    if confirm not in ("y", "yes"):
+                        log("Target is already up to date. No changes made.", "OK")
+                        sys.exit(0)
+                except KeyboardInterrupt:
+                    print("\nAborted.")
                     sys.exit(0)
-            except KeyboardInterrupt:
-                print("\nAborted.")
-                sys.exit(0)
+        else:
+            if not args.yes:
+                try:
+                    confirm = input(f"{YELLOW}Proceed with firmware flash? [Y/n]: {RESET}").strip().lower()
+                    if confirm and confirm not in ("y", "yes"):
+                        log("Flash aborted by user.", "WARN")
+                        sys.exit(0)
+                except KeyboardInterrupt:
+                    print("\nAborted.")
+                    sys.exit(0)
 
     # 4. Execute Flash
     success = False
