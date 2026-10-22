@@ -130,6 +130,7 @@ run_script("/home/pi/Desktop/Mothbox/scripts/read5V.py", show_output=True)
 run_script("/home/pi/Desktop/Mothbox/scripts/readCPUTemperature.py", show_output=True)
 
 if HW == "pro":
+    run_script("/home/pi/Desktop/Mothbox/scripts/3v3SensorsOn.py", show_output=False)
     time.sleep(2) # temp sensor needs a lot of time awake to run
     run_script("/home/pi/Desktop/Mothbox/scripts/BoardTemp_ds18b20.py", show_output=True)
     run_script("/home/pi/Desktop/Mothbox/scripts/readLightSensor.py", show_output=True)

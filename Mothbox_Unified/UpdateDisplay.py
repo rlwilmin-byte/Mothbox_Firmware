@@ -446,9 +446,8 @@ try:
         pass
 
     epd = epd2in13_V4.EPD()
-    logging.info("init and Clear")
+    logging.info("Initializing ePaper display (single-refresh soft start)...")
     epd.init()
-    epd.Clear(0xFF)
 
     # Drawing on the image
     #fontHeaders = load_font('/home/pi/Desktop/Mothbox/graphics/fonts/scientifica/ttf/scientificaBold.ttf', 13)
@@ -470,9 +469,6 @@ try:
     font_Mediumtext12=load_font('/home/pi/Desktop/Mothbox/graphics/fonts/clear-sans/TTF/ClearSans-Regular.ttf',12)
 
     font_roboto10=load_font('/home/pi/Desktop/Mothbox/graphics/fonts/scientifica/ttf/scientificaBold.ttf',12)
-
-    logging.info("E-paper refresh")
-    epd.init()
     
     #print(epd.width) #h 250px w 122
     # Setup for portrait mode

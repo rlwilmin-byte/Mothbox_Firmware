@@ -186,22 +186,32 @@ def should_update_display(event, settings_dict, current_mode, next_epoch=None, n
         return True
 
     # ep_mode == 'sparse'
-    # 3. Boot / Wake ALWAYS ranks higher than night lockout in sparse mode:
-    # Operators deploying or waking the box at any time (including after 18:00) always
-    # receive immediate on-screen device feedback (battery %, schedule, name, storage status).
-    if event == "boot":
-        return True
-
-    # 4. Shutdown / Sleep:
+    # Determine current local hour for nocturnal blackout calculation
     if now_dt:
         dt = now_dt
     elif hasattr(datetime, "datetime"):
         dt = datetime.datetime.now()
     else:
         dt = datetime.now()
+
+    # Deep-night unattended blackout (10 PM to 5 AM / dawn):
+    # During evening deployment (18:00 - 22:00) and daytime/morning collection (05:00+),
+    # operators are actively handling the box and need on-screen feedback on boot.
+    # Between 22:00 and 05:00, all hourly wakeups are autonomous unattended capture slots;
+    # suppressing ePaper refreshes during deep night eliminates PMIC reset risk entirely.
+    is_deep_night = False
     if dt.year >= 2024:
-        is_night = (dt.hour >= 18 or dt.hour < 6)
-        if is_night:
+        is_deep_night = (dt.hour >= 22 or dt.hour < 5)
+
+    if event == "boot":
+        if is_deep_night:
+            log_info(f"ePaper sparse mode: deep-night boot blackout active ({dt.strftime('%H:%M')} in 22:00-05:00) -- skipping display refresh.")
+            return False
+        return True
+
+    # Shutdown / Sleep:
+    if dt.year >= 2024:
+        if is_deep_night:
             # Exception: final sleep of the night session (sleep > 2h until next session).
             # Ensures morning collection operators see the completed night summary!
             if next_epoch is not None:
@@ -211,10 +221,10 @@ def should_update_display(event, settings_dict, current_mode, next_epoch=None, n
                     log_info(f"ePaper sparse mode: night session complete (sleep {sleep_duration/3600:.1f}h > 2h) -- updating dawn summary display.")
                     return True
 
-            log_info(f"ePaper sparse mode: nocturnal shutdown blackout active ({dt.strftime('%H:%M')} in 18:00-06:00) -- skipping display refresh.")
+            log_info(f"ePaper sparse mode: deep-night shutdown blackout active ({dt.strftime('%H:%M')} in 22:00-05:00) -- skipping display refresh.")
             return False
 
-    # Daytime shutdown (06:00 to 18:00) allows display refresh for collection feedback
+    # Daytime shutdown (05:00 to 22:00) allows display refresh for collection feedback
     return True
 
 
@@ -1409,13 +1419,16 @@ def run_shutdown_pi5(early_reason=None):
     #Epaper
     #Update the Epaper screen if policy allows
     if should_update_display("shutdown", settings, mode, next_epoch=next_epoch_time):
-        log_info("Updating ePaper display before shutdown (if available)...")
         if mothbox_hw is not None:
             try:
                 mothbox_hw.attract_off()
                 mothbox_hw.rail_12v(False)
+                mothbox_hw.rail_3v3(False)
             except Exception:
                 pass
+        log_info("Quiescent delay (3s) for power rail settling prior to shutdown ePaper update...")
+        time.sleep(3.0)
+        log_info("Updating ePaper display before shutdown (if available)...")
         run_helper("/home/pi/Desktop/Mothbox/UpdateDisplay.py", "UpdateDisplay error")
     else:
         log_info(f"Skipping ePaper display update before shutdown (epaper_mode={get_epaper_mode(settings)}).")
@@ -1434,6 +1447,20 @@ def run_shutdown_pi5(early_reason=None):
         if os.path.exists(fp):
             try: os.remove(fp)
             except Exception: pass
+
+    # Final RTC alarm verification immediately before hardware halt:
+    # Delays from final_backup (e.g. large USB transfers) or diagnostics can push
+    # the actual shutdown past the earlier armed wake target. Re-check now!
+    now_epoch = time.time()
+    min_shutdown_margin_s = 45  # Linux poweroff takes ~10-20s; need margin so alarm is in future
+    if next_epoch_time <= (now_epoch + min_shutdown_margin_s):
+        log_warn(f"[SHUTDOWN] Delays pushed actual halt ({now_epoch:.0f}) past or within {min_shutdown_margin_s}s "
+                 f"of armed wake target ({next_epoch_time}). Advancing to next scheduled window...")
+        next_epoch_time = calculate_next_event(cron_expression, utc_off, base_time=(now_epoch + min_shutdown_margin_s))
+
+    clear_wakeup_alarm()
+    set_wakeup_alarm(next_epoch_time)
+    log_ok(f"Final confirmed wakeup alarm armed for: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(next_epoch_time))}")
 
     os.system("sudo shutdown -h now")
 
@@ -1528,13 +1555,16 @@ def run_shutdown_pi5_FAST(early_reason=None):
     log_ok(f"Next wakeup scheduled for: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(next_epoch_time))}")
 
     if should_update_display("shutdown", settings, current_mode, next_epoch=next_epoch_time):
-        log_info("Updating ePaper display before shutdown (if available)...")
         if mothbox_hw is not None:
             try:
                 mothbox_hw.attract_off()
                 mothbox_hw.rail_12v(False)
+                mothbox_hw.rail_3v3(False)
             except Exception:
                 pass
+        log_info("Quiescent delay (3s) for power rail settling prior to fast shutdown ePaper update...")
+        time.sleep(3.0)
+        log_info("Updating ePaper display before shutdown (if available)...")
         run_helper("/home/pi/Desktop/Mothbox/UpdateDisplay.py", "UpdateDisplay error")
         time.sleep(2)
     else:
@@ -1549,6 +1579,18 @@ def run_shutdown_pi5_FAST(early_reason=None):
         if os.path.exists(fp):
             try: os.remove(fp)
             except Exception: pass
+
+    # Final RTC alarm verification immediately before hardware halt in fast shutdown
+    now_epoch = time.time()
+    min_shutdown_margin_s = 45
+    if next_epoch_time <= (now_epoch + min_shutdown_margin_s):
+        log_warn(f"[SHUTDOWN] Fast shutdown delays pushed halt past or within {min_shutdown_margin_s}s of armed wake target. Advancing wake...")
+        next_epoch_time = calculate_next_event(cron_expression, utc_off, base_time=(now_epoch + min_shutdown_margin_s))
+
+    clear_wakeup_alarm()
+    set_wakeup_alarm(next_epoch_time)
+    log_ok(f"Final confirmed wakeup alarm armed for: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(next_epoch_time))}")
+
     os.system("sudo shutdown -h now")
 
 
@@ -1763,13 +1805,21 @@ def modify_hours(data, offsett_value, key="hour"):
 
     return data  # Return the modified dictionary (or original if no modification)
 
-def calculate_next_event(cron_expression, utcOff):
+def calculate_next_event(cron_expression, utcOff, base_time=None):
     cron = CronTab(user="root")
     job = cron.new(command="echo hello_world")
     job.setall(cron_expression)
 
     # Work entirely in UTC
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    if base_time is not None:
+        if isinstance(base_time, (int, float)):
+            now_utc = datetime.datetime.fromtimestamp(base_time, tz=datetime.timezone.utc)
+        elif hasattr(base_time, "tzinfo") and base_time.tzinfo is not None:
+            now_utc = base_time.astimezone(datetime.timezone.utc)
+        else:
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+    else:
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
 
     # Convert UTC -> LOCAL using known offset
     now_local = now_utc + datetime.timedelta(hours=float(utcOff))
@@ -2281,8 +2331,8 @@ if __name__ == "__main__":
             try:
                 pwr = mothbox_hw.read_power()
                 v_rec = float(pwr.get("voltage_v", -1))
-                if 0 < v_rec < 10.8:
-                    log_warn(f"[CRASH_RECOVERY] Battery voltage is critically low ({v_rec:.2f}V < 10.8V). "
+                if 0 < v_rec < 9.8:
+                    log_warn(f"[CRASH_RECOVERY] Battery voltage is critically low ({v_rec:.2f}V < 9.8V). "
                              f"Aborting active session to prevent PMIC brownout crash loop.")
                     atomic_update_kv(os.path.join(CONTROL_ROOT, "mode.txt"), "mode", "STANDBY")
                     run_script("/home/pi/Desktop/Mothbox/Diagnostics.py", "Standby_Check", show_output=True)
@@ -2641,21 +2691,34 @@ if __name__ == "__main__":
     # as a banner on the e-paper instead of only as a blink pattern nobody is
     # there to count. TakePhoto.py rewrites this too if the camera dies mid-session.
     atomic_update_kv(os.path.join(CONTROL_ROOT, "camera.txt"), "camera", "ok" if camera_ok else "missing")
+    cam_reboot_file = os.path.join(CONTROL_ROOT, "cam_reboot_attempted.txt")
     if not camera_ok:
-        # Warn the human NOW, on every path, then carry on exactly as normal.
-        # The check is advisory only: nothing downstream is gated on it, so if this
-        # was a false positive the box still takes its photos. Better a needless
-        # warning than a silent night of blank frames.
-        log_warn("Camera not detected -- display banner set. "
-                 "Photos will still be attempted normally in case this is a false alarm.")
-        # OFF means OFF: an OFF box must never light anything. It already exits
-        # long before this point, but say so explicitly so that stays true if the
-        # camera check is ever moved earlier in the boot sequence.
-        if mode == "OFF":
-            log_info("Mode is OFF -- skipping the 8-blink warning (nothing may light up in OFF).")
+        cam_reboot_tried = read_control("cam_reboot_attempted", "0")
+        if cam_reboot_tried == "0" and mode != "OFF":
+            log_warn("[Scheduler] Camera not detected on cold boot (possible sensor probe -121 glitch). "
+                     "Attempting one-time warm reboot to re-probe CSI bus...")
+            atomic_update_kv(cam_reboot_file, "cam_reboot_attempted", "1")
+            time.sleep(2)
+            os.system("sudo reboot")
+            sys.exit(0)
         else:
-            log_warn("Blinking the 8x camera warning.")
-            run_cmd("python3 /home/pi/Desktop/Mothbox/scripts/blink_standby.py 8 0.5")
+            # Warn the human NOW, on every path, then carry on exactly as normal.
+            # The check is advisory only: nothing downstream is gated on it, so if this
+            # was a false positive the box still takes its photos. Better a needless
+            # warning than a silent night of blank frames.
+            log_warn("Camera not detected -- display banner set. "
+                     "Photos will still be attempted normally in case this is a false alarm.")
+            if mode == "OFF":
+                log_info("Mode is OFF -- skipping the 8-blink warning (nothing may light up in OFF).")
+            else:
+                log_warn("Blinking the 8x camera warning.")
+                run_cmd("python3 /home/pi/Desktop/Mothbox/scripts/blink_standby.py 8 0.5")
+    else:
+        if os.path.exists(cam_reboot_file):
+            try:
+                os.remove(cam_reboot_file)
+            except Exception:
+                pass
     #------ End Camera Check -------
 
     # ------ Media Health Check -------
@@ -2722,13 +2785,16 @@ if __name__ == "__main__":
 
     log_section("LAUNCH -- Display")
     if should_update_display("boot", settings, mode):
-        log_info("Updating ePaper display (if available)...")
         if mothbox_hw is not None:
             try:
                 mothbox_hw.attract_off()
                 mothbox_hw.rail_12v(False)
+                mothbox_hw.rail_3v3(False)
             except Exception:
                 pass
+        log_info("Quiescent delay (5s) for power rail and PMIC settling prior to ePaper update...")
+        time.sleep(5.0)
+        log_info("Updating ePaper display (if available)...")
         run_helper("/home/pi/Desktop/Mothbox/UpdateDisplay.py", "Display error")
     else:
         log_info(f"Skipping ePaper display update (epaper_mode={get_epaper_mode(settings)} in mode={mode}).")

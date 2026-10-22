@@ -85,18 +85,31 @@ class TestEpaperResilience(unittest.TestCase):
         """Sparse mode suppresses ePaper updates on nocturnal shutdown, but boot/wake ranks higher to allow deployment."""
         settings = {"epaper_mode": "sparse"}
 
-        night_hours = [18, 19, 21, 23, 0, 1, 3, 5]
-        for hr in night_hours:
+        # Deep night unattended hours (22:00 - 05:00): both boot and hourly shutdown are blacked out
+        deep_night_hours = [22, 23, 0, 1, 2, 3, 4]
+        for hr in deep_night_hours:
             dt = datetime(2026, 10, 18, hr, 15, 0)
-            # Boot during night: always allowed so deployments at any hour get feedback!
-            self.assertTrue(
+            # Boot during deep night: suppressed to prevent PMIC resets
+            self.assertFalse(
                 self.should_update_display("boot", settings, "ACTIVE", now_dt=dt),
-                f"Failed: ePaper boot update blocked at {hr}:15 in sparse mode"
+                f"Failed: ePaper boot update allowed at {hr}:15 in sparse mode during deep night"
             )
-            # Hourly shutdown during night: locked out to eliminate brownouts & save battery
+            # Hourly shutdown during deep night: locked out to eliminate PMIC brownouts & save battery
             self.assertFalse(
                 self.should_update_display("shutdown", settings, "ACTIVE", next_epoch=1000000 + 3600, now_dt=dt),
-                f"Failed: ePaper updated on hourly shutdown at {hr}:15 during nocturnal blackout"
+                f"Failed: ePaper updated on hourly shutdown at {hr}:15 during deep night blackout"
+            )
+
+        # Dusk / deployment hours (18:00 - 21:59): operator gets on-screen feedback on boot and shutdown
+        for hr in [18, 19, 20, 21]:
+            dt = datetime(2026, 10, 18, hr, 15, 0)
+            self.assertTrue(
+                self.should_update_display("boot", settings, "ACTIVE", now_dt=dt),
+                f"Failed: ePaper boot update blocked at {hr}:15 during dusk deployment hours"
+            )
+            self.assertTrue(
+                self.should_update_display("shutdown", settings, "ACTIVE", next_epoch=1000000 + 3600, now_dt=dt),
+                f"Failed: ePaper shutdown update blocked at {hr}:15 during dusk deployment hours"
             )
 
     def test_dawn_summary_update_in_sparse_mode(self):

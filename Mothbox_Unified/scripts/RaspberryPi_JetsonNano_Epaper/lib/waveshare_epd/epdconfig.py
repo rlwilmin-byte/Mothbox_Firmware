@@ -115,6 +115,7 @@ class RaspberryPi:
 
     def module_init(self, cleanup=False):
         self.GPIO_PWR_PIN.on()
+        time.sleep(0.1)  # 100ms soft-start dwell for on-panel power rail stabilization
         
         if cleanup:
             find_dirs = [
@@ -141,7 +142,7 @@ class RaspberryPi:
         else:
             # SPI device, bus = 0, device = 0
             self.SPI.open(0, 0)
-            self.SPI.max_speed_hz = 4000000
+            self.SPI.max_speed_hz = 2000000  # 2 MHz soft-start reduces di/dt switching noise
             self.SPI.mode = 0b00
         return 0
 
