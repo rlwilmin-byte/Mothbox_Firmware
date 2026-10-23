@@ -73,8 +73,8 @@ arm_64bit=1
 # Disable compensation for displays with overscan
 disable_overscan=1
 
-# Run as fast as firmware / board allows
-arm_boost=1
+# Run as fast as firmware / board allows (disabled to prevent boot-time voltage sag)
+# arm_boost=1
 
 [cm4]
 # Enable host mode on the 2711 built-in XHCI USB controller.
@@ -83,11 +83,15 @@ arm_boost=1
 otg_mode=1
 
 [all]
+# Clamp switched 3.3V sensor rail (active LOW on GPIO 27) OFF from the earliest bootloader microsecond
+gpio=27=op,dh
+
 dtoverlay=ov64a40,cam0,link-frequency=456000000
 dtparam=rtc_bbat_vchg=3000000
 dtoverlay=disable-bt
 
-PSU_MAX_CURRENT=5000
-usb_max_current_enable=1
+# Disabled to prevent unconstrained USB inrush current triggering PMIC brownout at boot:
+# PSU_MAX_CURRENT=5000
+# usb_max_current_enable=1
 
 dtoverlay=w1-gpio,gpiopin=4

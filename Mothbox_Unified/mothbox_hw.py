@@ -485,7 +485,7 @@ def flash_is_on():
 
 
 # ----------------------------------------------------------------- lights --
-def attract_on(stagger_s=0.05):
+def attract_on(stagger_s=0.075, rail_precharge_s=0.100):
     """
     Turn attract (UV / white) lights on with staged turn-on intervals.
 
@@ -495,6 +495,8 @@ def attract_on(stagger_s=0.05):
     """
     if is_pro():
         rail_12v(True)
+        if rail_precharge_s > 0:
+            time.sleep(rail_precharge_s)
         for pin in (PRO["CH3"], PRO["CH2"], PRO["CH1"], PRO["CHEXT"], PRO["CHEXT_PCB_BUG_PIN"]):
             _out(pin, True)
             if stagger_s > 0:

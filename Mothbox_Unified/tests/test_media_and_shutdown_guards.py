@@ -95,7 +95,7 @@ def load_scheduler_helpers(control_root):
         "switch_schedule": {},
         "load_settings_for_wakeup": lambda: {},
         "build_cron_expression": lambda s: "* * * * *",
-        "calculate_next_event": lambda c, u: 1000000,
+        "calculate_next_event": lambda c, u, **kw: 1000000,
         "clear_wakeup_alarm": MagicMock(),
         "set_wakeup_alarm": MagicMock(),
         "final_backup_before_shutdown": MagicMock(),

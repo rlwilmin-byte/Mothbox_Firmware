@@ -281,6 +281,142 @@ def find_sd_mounts(target_dev=None):
     return candidates
 
 
+def _write_file_root(path, content, dry_run=False):
+    """Writes text content to a file, falling back to sudo if normal write encounters PermissionError."""
+    if dry_run:
+        return
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+    except PermissionError:
+        subprocess.run(["sudo", "tee", path], input=content, text=True, stdout=subprocess.DEVNULL, check=True)
+
+
+def _symlink_root(target, link_name, dry_run=False):
+    """Creates a symbolic link, falling back to sudo if normal symlink encounters PermissionError."""
+    if dry_run:
+        return
+    try:
+        if os.path.lexists(link_name):
+            os.remove(link_name)
+        os.symlink(target, link_name)
+    except PermissionError:
+        subprocess.run(["sudo", "ln", "-sf", target, link_name], check=True)
+
+
+def harden_boot_and_power(rootfs, bootfs, dry_run=False):
+    """
+    Applies power and boot reliability hardening to eliminate early boot brownout crashes:
+      1. config.txt (bootfs):
+         - Clamps switched 3.3V sensor rail (active LOW on GPIO 27) OFF at early boot (gpio=27=op,dh)
+         - Comments out arm_boost=1 to prevent aggressive clock/voltage ramping
+         - Comments out PSU_MAX_CURRENT=5000 and usb_max_current_enable=1 to eliminate boot USB inrush
+         - Syncs mothbox_custom/reference_boot_config.txt if present
+      2. systemd-journald (rootfs):
+         - Sets Storage=volatile in /etc/systemd/journald.conf
+         - Masks systemd-journal-flush.service to prevent 500+ entry NAND write burst at t=1.6s
+    """
+    log("Checking boot & power resilience hardening...")
+    changes = []
+
+    # 1. Bootfs hardening (config.txt)
+    if bootfs and os.path.isdir(bootfs):
+        config_path = os.path.join(bootfs, "config.txt")
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+
+                orig_content = content
+
+                # Comment out arm_boost=1
+                content = re.sub(r'^(arm_boost\s*=\s*1)', r'# \1  # Disabled to prevent boot-time voltage sag', content, flags=re.MULTILINE)
+
+                # Comment out PSU_MAX_CURRENT=5000
+                content = re.sub(r'^(PSU_MAX_CURRENT\s*=\s*5000)', r'# \1  # Disabled to prevent boot USB inrush', content, flags=re.MULTILINE)
+
+                # Comment out usb_max_current_enable=1
+                content = re.sub(r'^(usb_max_current_enable\s*=\s*1)', r'# \1  # Disabled to prevent boot USB inrush', content, flags=re.MULTILINE)
+
+                # Ensure gpio=27=op,dh exists
+                if "gpio=27=op,dh" not in content:
+                    if "[all]" in content:
+                        content = content.replace("[all]", "[all]\n# Clamp switched 3.3V sensor rail (active LOW on GPIO 27) OFF from the earliest bootloader microsecond\ngpio=27=op,dh")
+                    else:
+                        content += "\n[all]\n# Clamp switched 3.3V sensor rail (active LOW on GPIO 27) OFF from the earliest bootloader microsecond\ngpio=27=op,dh\n"
+
+                if content != orig_content:
+                    _write_file_root(config_path, content, dry_run=dry_run)
+                    changes.append("bootfs/config.txt: clamped GPIO 27 OFF at boot, tamed USB/CPU inrush")
+            except Exception as e:
+                log(f"Warning: Failed to update {config_path}: {e}", "WARN")
+
+        # Sync reference config if available in repo
+        ref_src = os.path.join(REPO_ROOT, "mothbox_custom_Unified", "reference_boot_config.txt")
+        if os.path.exists(ref_src):
+            custom_ref = os.path.join(bootfs, "mothbox_custom", "reference_boot_config.txt")
+            try:
+                if not dry_run:
+                    os.makedirs(os.path.dirname(custom_ref), exist_ok=True)
+                    shutil.copy2(ref_src, custom_ref)
+                changes.append("bootfs/mothbox_custom/reference_boot_config.txt updated")
+            except Exception:
+                pass
+
+    # 2. Rootfs hardening (systemd journal flush & volatile storage)
+    if rootfs and os.path.isdir(rootfs):
+        # A. Mask systemd-journal-flush.service
+        system_dir = os.path.join(rootfs, "etc", "systemd", "system")
+        mask_link = os.path.join(system_dir, "systemd-journal-flush.service")
+        try:
+            if not os.path.exists(system_dir):
+                if not dry_run:
+                    try:
+                        os.makedirs(system_dir, exist_ok=True)
+                    except PermissionError:
+                        subprocess.run(["sudo", "mkdir", "-p", system_dir], check=True)
+            # Check if already masked to /dev/null
+            is_masked = False
+            if os.path.islink(mask_link):
+                try:
+                    if os.readlink(mask_link) == "/dev/null":
+                        is_masked = True
+                except OSError:
+                    pass
+            if not is_masked:
+                _symlink_root("/dev/null", mask_link, dry_run=dry_run)
+                changes.append("rootfs: masked systemd-journal-flush.service (eliminated 500+ entry NAND write burst at t=1.6s)")
+        except Exception as e:
+            log(f"Warning: Failed to mask systemd-journal-flush.service: {e}", "WARN")
+
+        # B. Set Storage=volatile in /etc/systemd/journald.conf
+        journald_conf = os.path.join(rootfs, "etc", "systemd", "journald.conf")
+        if os.path.exists(journald_conf):
+            try:
+                with open(journald_conf, "r", encoding="utf-8", errors="replace") as f:
+                    j_content = f.read()
+
+                j_orig = j_content
+                if re.search(r'^\s*Storage\s*=', j_content, flags=re.MULTILINE):
+                    j_content = re.sub(r'^\s*#?\s*Storage\s*=.*$', 'Storage=volatile', j_content, flags=re.MULTILINE)
+                elif "[Journal]" in j_content:
+                    j_content = j_content.replace("[Journal]", "[Journal]\nStorage=volatile")
+                else:
+                    j_content += "\n[Journal]\nStorage=volatile\n"
+
+                if j_content != j_orig:
+                    _write_file_root(journald_conf, j_content, dry_run=dry_run)
+                    changes.append("rootfs: set journald Storage=volatile")
+            except Exception as e:
+                log(f"Warning: Failed to configure journald.conf: {e}", "WARN")
+
+    if changes:
+        for c in changes:
+            log(f"Hardening applied: {c}", "OK")
+    else:
+        log("Hardening settings already in place.", "OK")
+
+
 def flash_sd_card(rootfs, bootfs, csv_path, dry_run=False, keep_settings=False, unmounted_root_dev=None):
     """Flashes firmware directly to mounted SD card partitions."""
     # Ironclad safety check: rootfs must be on an external media mount, NEVER host OS
@@ -375,6 +511,9 @@ def flash_sd_card(rootfs, bootfs, csv_path, dry_run=False, keep_settings=False, 
                 log(f"Warning: Could not copy settings CSV to bootfs: {e}", "WARN")
     elif keep_settings:
         log("Skipping settings CSV update (--keep-settings specified).")
+
+    # Apply boot & power resilience hardening (prevents early boot PMIC brownout reset)
+    harden_boot_and_power(rootfs, bootfs, dry_run=dry_run)
 
     # Sync filesystem buffers to physical storage
     if not dry_run:
