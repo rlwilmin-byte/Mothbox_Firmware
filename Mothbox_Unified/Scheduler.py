@@ -1105,16 +1105,16 @@ def schedule_shutdown(minutes):
                         else:
                             p = mothbox_hw.read_power()
                             v = float(p.get("voltage_v", -1))
-                            if 0.0 < v < 9.8:
+                            if 0.0 < v < 10.5:
                                 # Debounce: re-sample after 2.0s to confirm persistent resting voltage, not transient recovery
                                 time.sleep(2.0)
                                 if not is_takephoto_active() and not (hasattr(mothbox_hw, "flash_is_on") and mothbox_hw.flash_is_on()):
                                     p2 = mothbox_hw.read_power()
                                     v2 = float(p2.get("voltage_v", -1))
-                                    if 0.0 < v2 < 9.8:
+                                    if 0.0 < v2 < 10.5:
                                         reason = f"critical_battery_{v2:.2f}V"
                                         log_section(f"EARLY SHUTDOWN -- Critical Battery ({v2:.2f}V)")
-                                        log_warn(f"Battery resting voltage {v2:.2f}V < 9.8V brownout floor! Halting Mothbox gracefully to prevent PMIC brownout.")
+                                        log_warn(f"Battery resting voltage {v2:.2f}V < 10.5V floor! Halting Mothbox gracefully to prevent PMIC brownout.")
                                         atomic_update_kv(os.path.join(CONTROL_ROOT, "early_shutdown_reason.txt"), "early_shutdown_reason", reason)
                                         run_shutdown_pi5(early_reason=reason)
                                         break
@@ -1423,7 +1423,6 @@ def run_shutdown_pi5(early_reason=None):
             try:
                 mothbox_hw.attract_off()
                 mothbox_hw.rail_12v(False)
-                mothbox_hw.rail_3v3(False)
             except Exception:
                 pass
         log_info("Quiescent delay (3s) for power rail settling prior to shutdown ePaper update...")
@@ -1559,7 +1558,6 @@ def run_shutdown_pi5_FAST(early_reason=None):
             try:
                 mothbox_hw.attract_off()
                 mothbox_hw.rail_12v(False)
-                mothbox_hw.rail_3v3(False)
             except Exception:
                 pass
         log_info("Quiescent delay (3s) for power rail settling prior to fast shutdown ePaper update...")
@@ -2294,6 +2292,10 @@ if __name__ == "__main__":
                    f"voltage sensor: {_hw['voltage_sensor']}; light sensor: {_hw['light_sensor']})")
             if _hw["hardware"] == "diy":
                 log_info("DIY build: relay-HAT lights, OFF/DEBUG jumpers only, schedule from the CSV.")
+            else:
+                # Pro PCB: Hold 3.3V sensor rail continuously energized while system is awake
+                # to prevent unpowered ESD diodes from clamping the I2C/SPI bus.
+                mothbox_hw.rail_3v3(True)
         except Exception as e:
             log_warn(f"Hardware detection failed ({e}); scripts will assume Mothbox Pro.")
 
@@ -2789,7 +2791,6 @@ if __name__ == "__main__":
             try:
                 mothbox_hw.attract_off()
                 mothbox_hw.rail_12v(False)
-                mothbox_hw.rail_3v3(False)
             except Exception:
                 pass
         log_info("Quiescent delay (5s) for power rail and PMIC settling prior to ePaper update...")

@@ -803,9 +803,24 @@ def backup_and_delete(source_folder, destination_folder):
 
 
 
+def is_takephoto_active():
+    """Returns True if TakePhoto.py is currently running, indicating in-flight capture."""
+    try:
+        res = subprocess.run(
+            ["pgrep", "-f", "Mothbox/TakePhoto.py"],
+            capture_output=True, text=True, check=False
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
+
 if __name__ == "__main__":
     FINAL_BACKUP = "--final" in sys.argv[1:]
     if os.path.exists(BOOT_LOCK) and not FINAL_BACKUP:
+        sys.exit(0)
+
+    if not FINAL_BACKUP and is_takephoto_active():
+        print("[Backup] TakePhoto is actively capturing/bursting -- deferring backup to prevent compound inrush power sag.")
         sys.exit(0)
 
     acquire_backup_lock(final=FINAL_BACKUP)

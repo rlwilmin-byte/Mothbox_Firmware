@@ -225,13 +225,13 @@ class TestMediaAndShutdownGuards(unittest.TestCase):
         trigger_early_shutdown = self.tp_scope["trigger_early_shutdown"]
         read_control = self.tp_scope["read_control"]
 
-        # Non-aggressive: 10.2V should NOT trigger shutdown
-        voltage_safe = 10.2
-        self.assertFalse(0.0 < voltage_safe < 9.8)
+        # Non-aggressive: 10.8V should NOT trigger shutdown
+        voltage_safe = 10.8
+        self.assertFalse(0.0 < voltage_safe < 10.5)
 
         # Depleted pack: 9.4V under load -> must trigger shutdown
         voltage_crit = 9.40
-        self.assertTrue(0.0 < voltage_crit < 9.8)
+        self.assertTrue(0.0 < voltage_crit < 10.5)
 
         with patch("time.sleep"):
             trigger_early_shutdown(reason=f"critical_battery_{voltage_crit:.2f}V")

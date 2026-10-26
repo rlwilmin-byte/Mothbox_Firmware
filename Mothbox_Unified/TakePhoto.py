@@ -374,16 +374,14 @@ def flashOff():
     print("Flash Off\n")
 
 def flashOn(max_duration_s=None):
-    # Pre-flash voltage gate: query INA219/INA260 to inhibit flash if battery is critically low.
-    # Short burst pulses (<=1.0s) are safe down to 9.8V under attractor load (well above the 8.8V
-    # PMIC reset floor); longer continuous pulses use a stricter 11.0V cutoff.
+    # Pre-flash voltage gate: query INA219/INA260 to inhibit flash if battery is critically low (<10.5V chemical floor)
     if mothbox_hw is not None:
         try:
             pwr = mothbox_hw.read_power()
             v = pwr.get("voltage_v", -1.0)
-            cutoff_v = 11.0 if (max_duration_s is None or max_duration_s > 2.0) else 9.8
+            cutoff_v = 10.5
             if 0.0 < v < cutoff_v:
-                print(f"[TakePhoto] WARNING: Battery voltage ({v:.2f}V < {cutoff_v:.1f}V cutoff) -- INHIBITING FLASH to prevent PMIC halt/brownout!")
+                print(f"[TakePhoto] WARNING: Battery voltage ({v:.2f}V < {cutoff_v:.1f}V chemical floor) -- INHIBITING FLASH to prevent PMIC brownout!")
                 return False
         except Exception as e:
             print(f"[TakePhoto] Voltage check error ({e}) -- proceeding with caution.")
@@ -863,19 +861,29 @@ def takePhoto_Manual():
         
         t_flash_start = time.monotonic()
         p_idle = mothbox_hw.read_power() if mothbox_hw else {"voltage_v": -1.0, "current_a": 0.0}
+        v_idle = p_idle.get("voltage_v", -1.0)
+        if 0.0 < v_idle < 10.5:
+            print(f"[TakePhoto] CRITICAL BATTERY: Resting voltage {v_idle:.2f}V is below 10.5V chemical floor! Aborting capture.")
+            trigger_early_shutdown(reason=f"critical_battery_{v_idle:.2f}V")
+            break
+
         flash_fired = flashOn(max_duration_s=1.5)
+        if not flash_fired:
+            print(f"[TakePhoto] Flash inhibited by voltage guard -- cancelling capture to protect ML dataset integrity.")
+            trigger_early_shutdown(reason=f"flash_inhibited_{v_idle:.2f}V")
+            break
+
         request = None
         p_flash = None
         try:
-            if flash_fired:
-                time.sleep(0.005)  # 5ms MOSFET gate & phosphor stabilization buffer
+            time.sleep(0.005)  # 5ms MOSFET gate & phosphor stabilization buffer
             try:
                 request = picam2.capture_request(flush=True, wait=CAPTURE_TIMEOUT_S)
-                if flash_fired and mothbox_hw:
+                if mothbox_hw:
                     p_flash = mothbox_hw.read_power()
             except TypeError:
                 request = picam2.capture_request(flush=True)
-                if flash_fired and mothbox_hw:
+                if mothbox_hw:
                     p_flash = mothbox_hw.read_power()
         except Exception as e:
             flashOff()
@@ -883,9 +891,9 @@ def takePhoto_Manual():
         finally:
             flashOff()
             t_flash_dur = time.monotonic() - t_flash_start
+            v_fl = -1.0
             if flash_fired:
-                if p_flash and p_flash.get("voltage_v", -1) > 0 and p_idle.get("voltage_v", -1) > 0:
-                    v_idle = p_idle["voltage_v"]
+                if p_flash and p_flash.get("voltage_v", -1) > 0 and v_idle > 0:
                     v_fl = p_flash["voltage_v"]
                     a_fl = p_flash["current_a"]
                     sag = v_idle - v_fl
@@ -895,14 +903,20 @@ def takePhoto_Manual():
 
         flashtime=time.time()-start
 
-        pilImage = request.make_image("main")
-        PILs.append(pilImage)
-        metadatas.append(request.get_metadata())
-        flash_statuses.append(flash_fired)
-        request.release()
+        if request is not None:
+            pilImage = request.make_image("main")
+            PILs.append(pilImage)
+            metadatas.append(request.get_metadata())
+            flash_statuses.append(flash_fired)
+            request.release()
 
         picam2.stop()
         print("picture take time: "+str(flashtime))
+
+        if 0.0 < v_fl < 8.2:
+            print(f"[TakePhoto] CRITICAL FLASH SAG: Loaded voltage {v_fl:.2f}V < 8.2V dropout limit! Retiring hour to prevent brownout.")
+            trigger_early_shutdown(reason=f"loaded_flash_sag_{v_fl:.2f}V")
+            break
         
     # Gathered once per run for the EXIF: which sensor libcamera says this is,
     # and the most recent diagnostics readings already logged. Nothing is
@@ -1097,6 +1111,7 @@ def takePhoto_Burst(burst_count=8, interval_s=6.0):
 
     t0 = time.monotonic()
     successful_captures = 0
+    abort_reason = None
 
     for k in range(burst_count):
         # Monotonic deadline pacing prevents drift
@@ -1110,22 +1125,33 @@ def takePhoto_Burst(burst_count=8, interval_s=6.0):
         elapsed_shot = time.monotonic() - t0
         print(f"[Burst] Capturing frame {k + 1}/{burst_count} (target={k * interval_s:.1f}s, actual={elapsed_shot:.2f}s)...")
 
-        # Pulse flash for this single frame with rolling shutter window coverage
-        t_flash_start = time.monotonic()
+        # 1. Pre-flash power check
         p_idle = mothbox_hw.read_power() if mothbox_hw else {"voltage_v": -1.0, "current_a": 0.0}
+        v_idle = p_idle.get("voltage_v", -1.0)
+        if 0.0 < v_idle < 10.5:
+            print(f"[Burst] CRITICAL BATTERY: Resting voltage {v_idle:.2f}V is below 10.5V chemical floor! Aborting burst and retiring hour.")
+            abort_reason = f"critical_battery_{v_idle:.2f}V"
+            break
+
+        # 2. Pulse flash for this single frame with rolling shutter window coverage
+        t_flash_start = time.monotonic()
         flash_fired = flashOn(max_duration_s=1.5)
+        if not flash_fired:
+            print(f"[Burst] Flash inhibited by voltage guard -- cancelling capture to protect ML dataset integrity.")
+            abort_reason = f"flash_inhibited_{v_idle:.2f}V"
+            break
+
         request = None
         p_flash = None
         try:
-            if flash_fired:
-                time.sleep(0.005)  # 5ms MOSFET gate & phosphor stabilization buffer
+            time.sleep(0.005)  # 5ms MOSFET gate & phosphor stabilization buffer
             try:
                 request = picam2.capture_request(flush=True, wait=CAPTURE_TIMEOUT_S)
-                if flash_fired and mothbox_hw:
+                if mothbox_hw:
                     p_flash = mothbox_hw.read_power()
             except TypeError:
                 request = picam2.capture_request(flush=True)
-                if flash_fired and mothbox_hw:
+                if mothbox_hw:
                     p_flash = mothbox_hw.read_power()
         except Exception as e:
             flashOff()
@@ -1134,9 +1160,9 @@ def takePhoto_Burst(burst_count=8, interval_s=6.0):
         finally:
             flashOff()
             t_flash_dur = time.monotonic() - t_flash_start
+            v_fl = -1.0
             if flash_fired:
-                if p_flash and p_flash.get("voltage_v", -1) > 0 and p_idle.get("voltage_v", -1) > 0:
-                    v_idle = p_idle["voltage_v"]
+                if p_flash and p_flash.get("voltage_v", -1) > 0 and v_idle > 0:
                     v_fl = p_flash["voltage_v"]
                     a_fl = p_flash["current_a"]
                     sag = v_idle - v_fl
@@ -1144,27 +1170,38 @@ def takePhoto_Burst(burst_count=8, interval_s=6.0):
                 else:
                     print(f"[Burst] Frame {k + 1} flash strobe duration: {t_flash_dur * 1000.0:.1f}ms (single frame covered)", flush=True)
 
-        try:
-            pil_image = request.make_image("main")
-            md = request.get_metadata()
-            request.release()
-            successful_captures += 1
-            suffix = f"_b{k + 1}"
-            save_worker.enqueue((
-                pil_image, md, shot_time, exp_time,
-                k, burst_count, suffix, camera_sensor_name, ImageFileType, flash_fired
-            ))
-        except Exception as e:
-            print(f"[TakePhoto] Failed to process burst frame {k + 1}: {e}")
+        if request is not None:
+            try:
+                pil_image = request.make_image("main")
+                md = request.get_metadata()
+                request.release()
+                successful_captures += 1
+                suffix = f"_b{k + 1}"
+                save_worker.enqueue((
+                    pil_image, md, shot_time, exp_time,
+                    k, burst_count, suffix, camera_sensor_name, ImageFileType, flash_fired
+                ))
+            except Exception as e:
+                print(f"[TakePhoto] Failed to process burst frame {k + 1}: {e}")
 
-    # 3. Stop camera stream ONCE
+        # 3. Closed-loop flash sag check on actual loaded voltage
+        if 0.0 < v_fl < 8.2:
+            print(f"[Burst] CRITICAL FLASH SAG: Loaded flash voltage ({v_fl:.2f}V < 8.2V dropout limit)! Aborting remaining burst frames and retiring hour to prevent brownout.")
+            abort_reason = f"loaded_flash_sag_{v_fl:.2f}V"
+            break
+
+    # 4. Stop camera stream ONCE
     print(f"\n[Burst] Capture sequence finished ({successful_captures}/{burst_count} frames). Stopping camera stream.")
     picam2.stop()
 
-    # 4. Drain asynchronous save queue
+    # 5. Drain asynchronous save queue
     print("[Burst] Waiting for image save worker to finish writing...")
     save_worker.wait_done(timeout=45)
     print(f"[Burst] Complete: {save_worker.saved_count} photos successfully written to disk.")
+
+    if abort_reason:
+        trigger_early_shutdown(reason=abort_reason)
+
     return successful_captures > 0
 
 
@@ -1232,18 +1269,18 @@ if __name__ == "__main__":
     print(f"Current time: {formatted_time}")
     
     
-    # 1. Critical battery voltage pre-check (<9.8V PMIC brownout safety floor)
+    # 1. Critical battery voltage pre-check (<10.5V PMIC/chemical safety floor)
     # Prevents taking captures or firing flashes when battery voltage is critically depleted.
     try:
         if mothbox_hw is not None:
             pwr = mothbox_hw.read_power()
             v = float(pwr.get("voltage_v", -1))
-            if 0.0 < v < 9.8:
+            if 0.0 < v < 10.5:
                 time.sleep(1.0)
                 pwr = mothbox_hw.read_power()
                 v = float(pwr.get("voltage_v", -1))
-                if 0.0 < v < 9.8:
-                    print(f"[CRITICAL] Battery resting voltage {v:.2f}V is below 9.8V brownout floor! Aborting capture to prevent brownout.")
+                if 0.0 < v < 10.5:
+                    print(f"[CRITICAL] Battery resting voltage {v:.2f}V is below 10.5V chemical floor! Aborting capture.")
                     trigger_early_shutdown(reason=f"critical_battery_{v:.2f}V")
                     quit()
     except Exception as e:

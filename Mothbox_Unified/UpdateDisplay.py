@@ -406,6 +406,8 @@ softwareversion = read_control(CONTROL_ROOT / "softwareversion.txt", "softwareve
 try:
     import mothbox_hw
     hw_name = mothbox_hw.get_hardware()
+    if mothbox_hw.is_pro():
+        mothbox_hw.rail_3v3(True)
     _power = mothbox_hw.read_power()
     voltage = float(_power.get("voltage_v", -1))
     print(f"detected device: Mothbox {hw_name.upper()}   voltage sensor: {_power.get('sensor')}   "

@@ -8,3 +8,6 @@ __pycache__/
 # Local session logs
 logs/
 *.log
+
+# Raw SD card extraction dumps
+forensics/sd*/
