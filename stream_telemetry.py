@@ -116,6 +116,7 @@ def stream_feed():
                         n_photos = parts[3]
                         mode = parts[4]
                         p_tag = parts[5] if len(parts) >= 6 else "IDLE"
+                        thr_hex = parts[6] if len(parts) >= 7 else ""
                         # Determine battery health color
                         try:
                             vf = float(v)
@@ -123,8 +124,13 @@ def stream_feed():
                         except Exception:
                             pwr_col = CYAN
 
+                        thr_seg = ""
+                        if thr_hex:
+                            thr_col = GREEN if thr_hex == "0x0" else (YELLOW if thr_hex == "n/a" else RED + BOLD)
+                            thr_seg = f"  |  {BOLD}[PMIC]{RESET} {thr_col}throttled={thr_hex}{RESET}"
+
                         tag_label = f"[{p_tag} POWER]" if p_tag == "IDLE" else f"{YELLOW}[FLASH ACTIVE]{RESET}"
-                        emit(f"{DIM}[{ts}]{RESET} {BOLD}{pwr_col}{tag_label}{RESET} {v}V / {a}A  |  {BOLD}[PHOTOS]{RESET} {n_photos} saved  |  {BOLD}[MODE]{RESET} {mode}")
+                        emit(f"{DIM}[{ts}]{RESET} {BOLD}{pwr_col}{tag_label}{RESET} {v}V / {a}A  |  {BOLD}[PHOTOS]{RESET} {n_photos} saved  |  {BOLD}[MODE]{RESET} {mode}{thr_seg}")
 
                 elif line.startswith("__MB_TP__"):
                     msg = line[9:]

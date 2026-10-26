@@ -360,6 +360,33 @@ def _disarm_flash_watchdog():
             pass
         _flash_watchdog = None
 
+def _get_throttled_tag():
+    """Queries Pi PMIC get_throttled flags after flashOff() to detect sub-ms brownout latches."""
+    try:
+        from scripts.readThrottled import read_throttled
+        val = read_throttled()
+    except Exception:
+        try:
+            res = subprocess.run(["vcgencmd", "get_throttled"], capture_output=True, text=True, timeout=1.5)
+            val = int(res.stdout.strip().split("=")[1], 16)
+        except Exception:
+            val = None
+    if val is None:
+        return "throttled: n/a"
+    if val == 0:
+        return "throttled: 0x0"
+    flags = []
+    if val & 0x1:
+        flags.append("UV-NOW")
+    elif val & 0x10000:
+        flags.append("UV-latched")
+    if val & 0x4:
+        flags.append("THR-NOW")
+    elif val & 0x40000:
+        flags.append("THR-latched")
+    suffix = f" ({','.join(flags)})" if flags else ""
+    return f"throttled: {val:#x}{suffix}"
+
 # Drive the lights IN-PROCESS via mothbox_hw instead of shelling out to
 # Attract_On.py / Flash_On.py / Flash_Off.py. Those were four Python
 # interpreter startups per photo -- on a thermally throttled Pi that is
@@ -893,13 +920,14 @@ def takePhoto_Manual():
             t_flash_dur = time.monotonic() - t_flash_start
             v_fl = -1.0
             if flash_fired:
+                thr_tag = _get_throttled_tag()
                 if p_flash and p_flash.get("voltage_v", -1) > 0 and v_idle > 0:
                     v_fl = p_flash["voltage_v"]
                     a_fl = p_flash["current_a"]
                     sag = v_idle - v_fl
-                    print(f"[TakePhoto] Photo {i + 1} flash: {t_flash_dur * 1000.0:.1f}ms | Idle: {v_idle:.2f}V -> Flash: {v_fl:.2f}V @ {a_fl:.3f}A (sag -{sag:.2f}V)", flush=True)
+                    print(f"[TakePhoto] Photo {i + 1} flash: {t_flash_dur * 1000.0:.1f}ms | Idle: {v_idle:.2f}V -> Flash: {v_fl:.2f}V @ {a_fl:.3f}A (sag -{sag:.2f}V) | {thr_tag}", flush=True)
                 else:
-                    print(f"[TakePhoto] Photo {i + 1} flash strobe duration: {t_flash_dur * 1000.0:.1f}ms (single frame covered)", flush=True)
+                    print(f"[TakePhoto] Photo {i + 1} flash strobe duration: {t_flash_dur * 1000.0:.1f}ms (single frame covered) | {thr_tag}", flush=True)
 
         flashtime=time.time()-start
 
@@ -1162,13 +1190,14 @@ def takePhoto_Burst(burst_count=8, interval_s=6.0):
             t_flash_dur = time.monotonic() - t_flash_start
             v_fl = -1.0
             if flash_fired:
+                thr_tag = _get_throttled_tag()
                 if p_flash and p_flash.get("voltage_v", -1) > 0 and v_idle > 0:
                     v_fl = p_flash["voltage_v"]
                     a_fl = p_flash["current_a"]
                     sag = v_idle - v_fl
-                    print(f"[Burst] Frame {k + 1} flash: {t_flash_dur * 1000.0:.1f}ms | Idle: {v_idle:.2f}V -> Flash: {v_fl:.2f}V @ {a_fl:.3f}A (sag -{sag:.2f}V)", flush=True)
+                    print(f"[Burst] Frame {k + 1} flash: {t_flash_dur * 1000.0:.1f}ms | Idle: {v_idle:.2f}V -> Flash: {v_fl:.2f}V @ {a_fl:.3f}A (sag -{sag:.2f}V) | {thr_tag}", flush=True)
                 else:
-                    print(f"[Burst] Frame {k + 1} flash strobe duration: {t_flash_dur * 1000.0:.1f}ms (single frame covered)", flush=True)
+                    print(f"[Burst] Frame {k + 1} flash strobe duration: {t_flash_dur * 1000.0:.1f}ms (single frame covered) | {thr_tag}", flush=True)
 
         if request is not None:
             try:

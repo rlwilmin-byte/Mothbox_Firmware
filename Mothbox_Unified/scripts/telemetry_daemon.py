@@ -13,6 +13,10 @@ try:
     import mothbox_hw
 except Exception:
     mothbox_hw = None
+try:
+    from scripts.readThrottled import read_throttled
+except Exception:
+    read_throttled = None
 
 takephoto_log = "/home/pi/Desktop/Mothbox/logs/TakePhoto_log.txt"
 scheduler_log = "/home/pi/Desktop/Mothbox/logs/Scheduler_log.txt"
@@ -55,7 +59,9 @@ while True:
                     mode = f.read().strip()
             except Exception:
                 pass
-            print(f"__MB_TEL__:{v:.2f}:{a:.3f}:{photos}:{mode}:IDLE", flush=True)
+            thr_val = read_throttled() if read_throttled else None
+            thr_str = f"{thr_val:#x}" if thr_val is not None else "n/a"
+            print(f"__MB_TEL__:{v:.2f}:{a:.3f}:{photos}:{mode}:IDLE:{thr_str}", flush=True)
 
     if os.path.exists(takephoto_log):
         try:

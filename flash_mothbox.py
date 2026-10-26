@@ -417,6 +417,69 @@ def harden_boot_and_power(rootfs, bootfs, dry_run=False):
         log("Hardening settings already in place.", "OK")
 
 
+def sanitize_per_box_state(rootfs, dry_run=False):
+    """
+    Purges stale per-box runtime state, root-owned bytecode caches, and test leftovers
+    (per DINALAB 6.0.3 zzzz_NewImageChecklist.txt steps 5a/5b) so newly imaged or
+    re-flashed SD cards start with a clean state slate.
+    """
+    if not rootfs or not os.path.isdir(rootfs):
+        return
+    if rootfs in ("/", "/home", "/root", "/boot", "/boot/efi"):
+        return
+
+    cleaned = []
+
+    # 1. Wipe /var/lib/mothbox/state/*.txt (lat, lon, aflensposition, nextwake, boot_crash_count, etc.)
+    state_dir = os.path.join(rootfs, "var", "lib", "mothbox", "state")
+    if os.path.isdir(state_dir):
+        txt_files = glob.glob(os.path.join(state_dir, "*.txt"))
+        if txt_files:
+            if not dry_run:
+                for tf in txt_files:
+                    try:
+                        os.remove(tf)
+                    except PermissionError:
+                        subprocess.run(["sudo", "rm", "-f", tf], check=False)
+                    except OSError:
+                        pass
+            cleaned.append(f"wiped {len(txt_files)} stale state file(s) in /var/lib/mothbox/state/")
+
+    # 2. Remove stale root-owned __pycache__ directories in Mothbox folder
+    mb_dir = os.path.join(rootfs, "home", "pi", "Desktop", "Mothbox")
+    for cache_dir in [
+        os.path.join(mb_dir, "__pycache__"),
+        os.path.join(mb_dir, "scripts", "__pycache__"),
+        os.path.join(mb_dir, "tests", "__pycache__"),
+    ]:
+        if os.path.isdir(cache_dir):
+            if not dry_run:
+                try:
+                    shutil.rmtree(cache_dir)
+                except PermissionError:
+                    subprocess.run(["sudo", "rm", "-rf", cache_dir], check=False)
+                except OSError:
+                    pass
+            cleaned.append(f"removed {os.path.relpath(cache_dir, rootfs)}")
+
+    # 3. Remove test leftovers in /home/pi
+    pi_home = os.path.join(rootfs, "home", "pi")
+    if os.path.isdir(pi_home):
+        leftovers = glob.glob(os.path.join(pi_home, "thermtest.log")) + glob.glob(os.path.join(pi_home, "fat_*.txt"))
+        for lf in leftovers:
+            if not dry_run:
+                try:
+                    os.remove(lf)
+                except PermissionError:
+                    subprocess.run(["sudo", "rm", "-f", lf], check=False)
+                except OSError:
+                    pass
+            cleaned.append(f"removed leftover {os.path.basename(lf)}")
+
+    if cleaned:
+        log(f"Sanitized per-box state: {', '.join(cleaned)}", "OK")
+
+
 def flash_sd_card(rootfs, bootfs, csv_path, dry_run=False, keep_settings=False, unmounted_root_dev=None):
     """Flashes firmware directly to mounted SD card partitions."""
     # Ironclad safety check: rootfs must be on an external media mount, NEVER host OS
@@ -511,6 +574,10 @@ def flash_sd_card(rootfs, bootfs, csv_path, dry_run=False, keep_settings=False, 
                 log(f"Warning: Could not copy settings CSV to bootfs: {e}", "WARN")
     elif keep_settings:
         log("Skipping settings CSV update (--keep-settings specified).")
+
+    # Sanitize stale per-box state & caches unless preserving existing box state
+    if not keep_settings:
+        sanitize_per_box_state(rootfs, dry_run=dry_run)
 
     # Apply boot & power resilience hardening (prevents early boot PMIC brownout reset)
     harden_boot_and_power(rootfs, bootfs, dry_run=dry_run)
