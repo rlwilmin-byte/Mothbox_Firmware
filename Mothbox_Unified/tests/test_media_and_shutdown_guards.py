@@ -52,6 +52,7 @@ def load_scheduler_helpers(control_root):
         "atomic_write",
         "get_control_values",
         "read_control",
+        "arm_provisional_rtc_wakeup",
     )
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(
@@ -101,6 +102,8 @@ def load_scheduler_helpers(control_root):
         "final_backup_before_shutdown": MagicMock(),
         "run_helper": MagicMock(),
         "run_script": MagicMock(),
+        "run_mode_script": MagicMock(),
+        "current_mode": "ACTIVE",
         "should_abort_shutdown": MagicMock(return_value=None),
         "should_reboot_before_poweroff": lambda: False,
         "filesystem_needs_expansion": lambda: False,
@@ -356,17 +359,24 @@ class TestMediaAndShutdownGuards(unittest.TestCase):
     # 5. ePaper Display Override on Media Warning
     # -------------------------------------------------------------------------
     def test_should_update_display_overrides_sparse_blackout_on_media_warning(self):
-        """Active media warning must force ePaper display refresh even during nocturnal blackout."""
+        """Critical media errors (USB READ-ONLY) force ePaper display refresh; non-fatal advisories (NO USB DRIVE) are suppressed at deep night."""
         should_update_display = self.sched_scope["should_update_display"]
         atomic_update = self.sched_scope["atomic_update_kv"]
         settings = {"epaper_mode": "sparse"}
-        night_dt = datetime(2026, 10, 18, 23, 0, 0)  # 11:00 PM (nighttime blackout)
+        night_dt = datetime(2026, 10, 18, 23, 0, 0)  # 11:00 PM (deep-night blackout)
+        dusk_dt = datetime(2026, 10, 18, 21, 0, 0)   # 9:00 PM (deployment hour)
 
         # Without warning: nocturnal shutdown blackout suppresses update
         self.assertFalse(should_update_display("shutdown", settings, "ACTIVE", next_epoch=1000000 + 3600, now_dt=night_dt))
 
-        # With media warning: must FORCE update so operator sees the warning on deployment or shutdown
+        # Advisory warning ("NO USB DRIVE"): suppressed during deep night (23:00) to protect battery
         atomic_update(str(self.control_root / "media_warning.txt"), "media_warning", "NO USB DRIVE")
+        self.assertFalse(should_update_display("shutdown", settings, "ACTIVE", next_epoch=1000000 + 3600, now_dt=night_dt))
+        # But allowed during dusk deployment (21:00) for operator visibility
+        self.assertTrue(should_update_display("shutdown", settings, "ACTIVE", next_epoch=1000000 + 3600, now_dt=dusk_dt))
+
+        # Critical media failure ("USB READ-ONLY"): forces update even during deep night
+        atomic_update(str(self.control_root / "media_warning.txt"), "media_warning", "USB READ-ONLY")
         self.assertTrue(should_update_display("shutdown", settings, "ACTIVE", next_epoch=1000000 + 3600, now_dt=night_dt))
 
     # -------------------------------------------------------------------------
@@ -395,6 +405,36 @@ class TestMediaAndShutdownGuards(unittest.TestCase):
         # Verify black pixels inside banner box and white background elsewhere
         self.assertEqual(img.getpixel((5, by + 5)), 0)   # Black background
         self.assertEqual(img.getpixel((5, 10)), 255)     # White canvas elsewhere
+
+    # -------------------------------------------------------------------------
+    # 7. Early-Boot Provisional RTC Arming & Crash Circuit Breaker
+    # -------------------------------------------------------------------------
+    def test_arm_provisional_rtc_wakeup_latches_hardware_alarm(self):
+        """arm_provisional_rtc_wakeup must latch next scheduled wake into sysfs without errors."""
+        arm_provisional = self.sched_scope.get("arm_provisional_rtc_wakeup")
+        self.assertIsNotNone(arm_provisional)
+
+        with patch("os.path.exists", side_effect=lambda p: True if "wakealarm" in p else False), \
+             patch.dict(self.sched_scope, {
+                 "clear_wakeup_alarm": MagicMock(),
+                 "set_wakeup_alarm": MagicMock(),
+                 "calculate_next_event": MagicMock(return_value=1700003600),
+             }):
+            next_wake = arm_provisional()
+            self.assertEqual(next_wake, 1700003600)
+            self.sched_scope["clear_wakeup_alarm"].assert_called_once()
+            self.sched_scope["set_wakeup_alarm"].assert_called_once_with(1700003600)
+
+    def test_clean_shutdown_resets_dirty_boot_count(self):
+        """Clean shutdown (fast or standard) must reset dirty_boot_count.txt to '0'."""
+        run_shutdown_FAST = self.sched_scope["run_shutdown_pi5_FAST"]
+        dirty_file = self.control_root / "dirty_boot_count.txt"
+        self.sched_scope["atomic_update_kv"](str(dirty_file), "dirty_boot_count", "2")
+
+        with patch("os.system") as mock_sys, \
+             patch("time.sleep"):
+            run_shutdown_FAST(early_reason="test_clean_reset")
+            self.assertEqual(self.sched_scope["read_control"]("dirty_boot_count"), "0")
 
 
 if __name__ == "__main__":
